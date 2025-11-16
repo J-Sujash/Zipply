@@ -1,35 +1,36 @@
-import React, { useState, useEffect } from 'react';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { router } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
-  TouchableOpacity,
+    Alert,
+    KeyboardAvoidingView,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '../../contexts/AuthContext';
-import { supabase } from '../../lib/supabase';
-import { router } from 'expo-router';
+import { rideApi } from '../../lib/apiClient';
+import { notifyRideCreated as notifyRideCreatedToast } from '../../lib/notificationManager';
 import { notifyRideCreated } from '../../lib/notifications';
+import { supabase } from '../../lib/supabase';
 
 import { Button } from '../../components/ui/Button';
-import { Input } from '../../components/ui/Input';
 import { Card } from '../../components/ui/Card';
 import {
-  LocationIcon,
-  TimeIcon,
-  CalendarIcon,
-  UserIcon,
-  CarIcon,
-  CheckIcon,
+    CalendarIcon,
+    CarIcon,
+    CheckIcon,
+    LocationIcon,
+    TimeIcon
 } from '../../components/ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
+import { Input } from '../../components/ui/Input';
 import { NotificationIcon } from '../../components/ui/NotificationIcon';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
 
 interface Vehicle {
   id: string;
@@ -170,67 +171,90 @@ export default function CreateRideScreen() {
 
     setLoading(true);
     try {
-      // Format date and time for database (keep as local time but ensure proper format)
-      const selectedDateTime = new Date(
-        selectedDate.getFullYear(),
-        selectedDate.getMonth(),
-        selectedDate.getDate(),
-        selectedTime.getHours(),
-        selectedTime.getMinutes()
-      );
+      console.log('🚗 Creating ride via server...');
       
-      // Format as local time for database (database constraint likely expects local time)
-      const departureDate = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(selectedDate.getDate()).padStart(2, '0')}`;
-      const departureTime = `${String(selectedTime.getHours()).padStart(2, '0')}:${String(selectedTime.getMinutes()).padStart(2, '0')}:00`;
+      // Simple date/time formatting - let server handle EST conversion
+      const dateStr = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(selectedDate.getDate()).padStart(2, '0')}`;
+      const timeStr = `${String(selectedTime.getHours()).padStart(2, '0')}:${String(selectedTime.getMinutes()).padStart(2, '0')}`;
       
-      console.log(`🕐 DATABASE STORAGE:`);
-      console.log(`   Local Selected: ${selectedDateTime.toLocaleString()}`);
-      console.log(`   Date: ${departureDate}, Time: ${departureTime}`);
+      console.log(`📤 Sending to server: ${dateStr} ${timeStr}`);
 
-      // Get the selected vehicle to determine total seats
       const selectedVehicle = vehicles.find(v => v.id === formData.vehicleId);
       const vehicleTotalSeats = selectedVehicle?.seats || parseInt(formData.availableSeats) + 1;
 
-      // Create ride in database
-      const { data, error } = await supabase
-        .from('rides')
-        .insert({
-          driver_id: user.id,
-          title: `${formData.from} to ${formData.to}`,
-          departure_location: formData.from.trim(),
-          destination_location: formData.to.trim(),
-          departure_date: departureDate,
-          departure_time: departureTime,
-          total_seats: vehicleTotalSeats, // Store actual vehicle capacity
-          available_seats: parseInt(formData.availableSeats), // Store passenger seats available
-          price_per_seat: parseFloat(formData.price),
-          description: formData.description.trim() || null,
-          status: 'active',
-          vehicle_id: formData.vehicleId || null,
-        })
-        .select()
-        .single();
+      // Create ride via server API - PRODUCTION READY
+      console.log('🚗 Creating ride via server API...');
+      // Format data for the optimized server API (separate date and time)
+      // Send time as Eastern Time - server will handle it correctly
+      const departureDate = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(selectedDate.getDate()).padStart(2, '0')}`; // YYYY-MM-DD
+      const departureTime = `${String(selectedTime.getHours()).padStart(2, '0')}:${String(selectedTime.getMinutes()).padStart(2, '0')}:00`; // HH:MM:SS in Eastern Time
+      
+      const rideData = {
+        title: `${formData.from} to ${formData.to}`,
+        departure_location: formData.from,
+        destination_location: formData.to,
+        departure_date: departureDate,
+        departure_time: departureTime,
+        total_seats: parseInt(formData.availableSeats),
+        price_per_seat: parseFloat(formData.price),
+        description: formData.description || undefined,
+        car_make: selectedVehicle?.make,
+        car_model: selectedVehicle?.model,
+        car_color: selectedVehicle?.color,
+        car_license_plate: selectedVehicle?.license_plate,
+        // Send timezone info - user enters time in Eastern Time
+        user_timezone: 'America/New_York',
+        user_location: null, // Optional, server will default to Eastern
+      };
+      
+      console.log('📦 Sending optimized ride data:', rideData);
+      
+      // Use the optimized API client
+      console.log('🚀 Creating ride via optimized server...');
+      const response = await rideApi.createRide(rideData);
+      console.log('✅ Server response:', response);
 
-      if (error) throw error;
+      if (!response.success) {
+        throw new Error('Server returned unsuccessful response');
+      }
+
+      const newRide = response.ride;
+      console.log('✅ Ride created successfully:', newRide);
+      console.log('🎉 SUCCESS! Ride saved to database with ID:', newRide.id);
 
       // Send notification to the driver about successful ride creation
-      await notifyRideCreated(
-        user.id,
-        `${formData.from} to ${formData.to}`,
-        departureDate,
-        departureTime,
-        data.id
-      );
+      console.log('🔔 Creating ride notification...');
+      try {
+        // Send database notification
+        await notifyRideCreated(
+          user.id,
+          `${formData.from} to ${formData.to}`,
+          newRide.departure_date,
+          newRide.departure_time,
+          newRide.id
+        );
+
+        // Show Instagram-style in-app notification (if app is active) or push notification (if app is inactive)
+        await notifyRideCreatedToast(
+          `${formData.from} to ${formData.to}`,
+          newRide.departure_date,
+          newRide.departure_time
+        );
+        console.log('✅ Ride notification created successfully');
+      } catch (notificationError) {
+        console.error('⚠️ Failed to create notification:', notificationError);
+        // Don't fail the whole process if notification fails
+      }
 
       Alert.alert(
-        'Success! 🎉',
-        'Your ride has been created successfully! Other students can now find and join your ride.',
+        'Ride Created! 🎉',
+        `Your ride has been successfully created and saved to the database!\n\nFrom: ${formData.from}\nTo: ${formData.to}\nDate: ${departureDate}\nTime: ${departureTime}\n\nOther students can now find and join your ride.`,
         [
           { 
             text: 'View Ride', 
             onPress: () => {
               resetForm();
-              router.push({ pathname: '/ride/[rideId]', params: { rideId: data.id } });
+              router.push({ pathname: '/ride/[rideId]', params: { rideId: newRide.id } });
             }
           },
           { 
@@ -241,11 +265,22 @@ export default function CreateRideScreen() {
         ]
       );
     } catch (error: any) {
-      console.error('Error creating ride:', error);
-      Alert.alert(
-        'Error', 
-        error.message || 'Failed to create ride. Please check your connection and try again.'
-      );
+      console.error('❌ Error creating ride via server:', error);
+      
+      let errorMessage = 'Failed to create ride. Please try again.';
+      if (error.message.includes('timeout')) {
+        errorMessage = 'Request timed out. Please check your connection and try again.';
+      } else if (error.message.includes('Network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (error.message.includes('server')) {
+        errorMessage = 'Server error. Please try again later.';
+      } else if (error.message.includes('401')) {
+        errorMessage = 'Authentication error. Please sign in again.';
+      } else if (error.message.includes('validation')) {
+        errorMessage = 'Please check all fields and try again.';
+      }
+      
+      Alert.alert('Error Creating Ride', errorMessage);
     } finally {
       setLoading(false);
     }

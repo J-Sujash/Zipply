@@ -1,6 +1,8 @@
 import { decode } from 'base64-arraybuffer';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from './supabase';
+// TODO: Replace direct Supabase calls with API client calls to go through application server
+// Profile picture upload should use server endpoint for consistency
 
 export interface ImageUploadResult {
   success: boolean;

@@ -153,6 +153,30 @@ export const SettingsIcon: React.FC<IconProps> = ({ size = 24, color = Colors.te
   <Ionicons name="settings-outline" size={size} color={color} />
 );
 
+export const GraduationCapIcon: React.FC<IconProps> = ({ size = 24, color = Colors.textSecondary }) => (
+  <Ionicons name="school" size={size} color={color} />
+);
+
+export const ShieldCheckIcon: React.FC<IconProps> = ({ size = 24, color = Colors.textSecondary }) => (
+  <Ionicons name="shield-checkmark-outline" size={size} color={color} />
+);
+
+export const CheckCircleIcon: React.FC<IconProps> = ({ size = 24, color = Colors.success }) => (
+  <Ionicons name="checkmark-circle" size={size} color={color} />
+);
+
+export const MessageCircleIcon: React.FC<IconProps> = ({ size = 24, color = Colors.textSecondary }) => (
+  <Ionicons name="chatbubble-ellipses-outline" size={size} color={color} />
+);
+
+export const BookOpenIcon: React.FC<IconProps> = ({ size = 24, color = Colors.textSecondary }) => (
+  <Ionicons name="book-outline" size={size} color={color} />
+);
+
+export const DollarIcon: React.FC<IconProps> = ({ size = 24, color = Colors.textSecondary }) => (
+  <Ionicons name="cash-outline" size={size} color={color} />
+);
+
 const styles = StyleSheet.create({
   icon: {
     textAlign: 'center',

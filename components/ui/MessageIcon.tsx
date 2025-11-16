@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
-import { TouchableOpacity, View, Text, StyleSheet } from 'react-native';
 import { router } from 'expo-router';
-import { MessageIcon } from './Icons';
-import { Colors, FontSize, Spacing, BorderRadius } from '../../constants/Colors';
+import React, { useEffect, useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
+import { useAuth } from '../../contexts/AuthContext';
 import { getUnreadMessageCount } from '../../lib/messaging';
+import { MessageIcon } from './Icons';
 
 interface MessageIconProps {
   size?: number;
@@ -14,28 +15,46 @@ export const MessageIconWithBadge: React.FC<MessageIconProps> = ({
   size = 24, 
   color = Colors.text 
 }) => {
+  const { user } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
-    fetchUnreadCount();
-    
-    // Refresh count every 30 seconds
-    const interval = setInterval(fetchUnreadCount, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    if (user) {
+      fetchUnreadCount();
+      
+      // Refresh count every 30 seconds
+      const interval = setInterval(fetchUnreadCount, 30000);
+      return () => clearInterval(interval);
+    } else {
+      console.log(' No user found, cannot fetch message count');
+      setUnreadCount(0);
+    }
+  }, [user]);
 
   const fetchUnreadCount = async () => {
+    if (!user) return;
+    
     try {
       const count = await getUnreadMessageCount();
+      if (__DEV__) {
+        console.log('💬 Unread message count:', count);
+      }
       setUnreadCount(count);
     } catch (error) {
-      console.error('Error fetching unread message count:', error);
+      if (__DEV__) {
+        console.error('💬 Error fetching unread message count:', error);
+      }
+      setUnreadCount(0);
     }
   };
 
   const handlePress = () => {
-    router.push('/messages/' as any);
+    if (__DEV__) {
+      console.log('💬 Message icon pressed, navigating to chats');
+    }
+    router.push('/chats');
   };
+
 
   return (
     <TouchableOpacity onPress={handlePress} style={styles.container}>

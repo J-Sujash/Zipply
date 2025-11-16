@@ -3,44 +3,50 @@ import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  FlatList,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    FlatList,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
-import { notifyRideRequest, notifyRideRequestSent } from '../../lib/notifications';
-import { supabase } from '../../lib/supabase';
+import { rideApi } from '../../lib/apiClient';
+import { notifyRideRequestSent } from '../../lib/notifications';
+import { getShadowStyle } from '../../lib/shadowUtils';
 
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import {
-  CalendarIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
-  ClockIcon,
-  FilterIcon,
-  SearchIcon,
-  StarIcon,
-  TimeIcon,
-  UserIcon
+    CalendarIcon,
+    ChevronDownIcon,
+    ChevronUpIcon,
+    ClockIcon,
+    FilterIcon,
+    SearchIcon,
+    StarIcon,
+    TimeIcon,
+    UserIcon
 } from '../../components/ui/Icons';
 import { Input } from '../../components/ui/Input';
 import { NotificationIcon } from '../../components/ui/NotificationIcon';
 import { RequestMessageModal } from '../../components/ui/RequestMessageModal';
 import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
+import { sendNotification } from '../../lib/notificationManager';
+
+// PERFORMANCE OPTIMIZATION - Caching and faster loading
+const CACHE_BUSTER = '2025-10-27-00:48:00-PERFORMANCE-OPTIMIZATION';
 
 interface Ride {
   id: string;
   title: string;
   driverName: string;
   driverRating: number;
+  driverId: string;  // Add driver ID for ownership checks
   departureLocation: string;
   destinationLocation: string;
   departureDate: string;
@@ -49,7 +55,8 @@ interface Ride {
   availableSeats: number;
   totalSeats: number;
   description: string;
-  requestStatus?: 'pending' | 'approved' | 'rejected' | null;
+  requestStatus: 'pending' | 'approved' | 'rejected' | null;
+  requestId?: string | null;
 }
 
 export default function HomeScreen() {
@@ -60,15 +67,32 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFilter, setSelectedFilter] = useState('all');
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
-  const [maxPrice, setMaxPrice] = useState(50);
+  const [maxPrice, setMaxPrice] = useState(100);
   const [selectedSeats, setSelectedSeats] = useState<number | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const [selectedRating, setSelectedRating] = useState<number | null>(null);
+  const [filtersApplied, setFiltersApplied] = useState(false);
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requesting, setRequesting] = useState(false);
+  const [lastFetchTime, setLastFetchTime] = useState<number>(0);
+  const [cachedRides, setCachedRides] = useState<Ride[]>([]);
 
-  const filters = [
+  // Force refresh when component becomes focused (to show updated request status)
+  useEffect(() => {
+    const handleFocus = () => {
+      fetchRides(true); // Force refresh
+    };
+
+    // Listen for when the screen comes into focus
+    const focusListener = () => handleFocus();
+    
+    // For now, just refresh on mount and when user changes
+    // The proper focus listener would need react-navigation setup
+    return () => {};
+  }, []);
+
+  const dateFilters = [
     { id: 'all', label: 'All Rides' },
     { id: 'today', label: 'Today' },
     { id: 'tomorrow', label: 'Tomorrow' },
@@ -76,69 +100,157 @@ export default function HomeScreen() {
   ];
 
   useEffect(() => {
-    if (user) {
+    // Only fetch rides when user is authenticated and component mounts
+    // Don't auto-fetch on every user change to reduce API calls
+    if (user && rides.length === 0) {
       fetchRides();
     }
   }, [user]);
 
-  const fetchRides = async () => {
+  const fetchRides = async (forceRefresh = false) => {
+    if (!user) {
+      return;
+    }
+
+    // PERFORMANCE OPTIMIZATION - Use cache if data is fresh (10 seconds for request status)
+    const now = Date.now();
+    const cacheAge = now - lastFetchTime;
+    const CACHE_DURATION = 10 * 1000; // Reduced to 10 seconds to pick up status changes faster
+
+    if (!forceRefresh && cacheAge < CACHE_DURATION && cachedRides.length > 0) {
+      setRides(cachedRides);
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
     try {
       setLoading(true);
       
-      const { data, error } = await supabase
-        .from('rides')
-        .select(`
-          id,
-          title,
-          departure_location,
-          destination_location,
-          departure_date,
-          departure_time,
-          price_per_seat,
-          available_seats,
-          total_seats,
-          description,
-          driver:profiles!rides_driver_id_fkey (
-            first_name,
-            last_name,
-            rating
-          ),
-          ride_requests (
-            status,
-            passenger_id
-          )
-        `)
-        .eq('status', 'active')
-        .gt('available_seats', 0)
-        .neq('driver_id', user?.id || '');
+      // PROPER APP: Build filters object - only future rides from other users
+      const searchFilters: any = {
+        status: 'active',
+        limit: 50,
+        offset: 0,
+        exclude_own_rides: true  // Exclude user's own rides
+      };
+      
+      
 
-      if (error) throw error;
+      // Additional filters can be added here if needed in the future
 
-      const formattedRides: Ride[] = (data || []).map((ride: any) => {
-        // Check if current user has requested this ride
-        const userRequest = ride.ride_requests?.find((req: any) => req.passenger_id === user?.id);
-        
-        return {
-          id: ride.id,
-          title: ride.title,
-          driverName: `${ride.driver.first_name} ${ride.driver.last_name}`,
-          driverRating: ride.driver.rating || 4.5,
-          departureLocation: ride.departure_location,
-          destinationLocation: ride.destination_location,
-          departureDate: ride.departure_date,
-          departureTime: ride.departure_time,
-          pricePerSeat: ride.price_per_seat,
-          availableSeats: ride.available_seats,
-          totalSeats: ride.total_seats,
-          description: ride.description,
-          requestStatus: userRequest?.status || null,
-        };
+      // Use the centralized API client with filters
+      
+      const serverRides = await rideApi.getRides(searchFilters);
+
+      if (!Array.isArray(serverRides)) {
+        throw new Error('Invalid response format from server');
+      }
+
+      // Filter out user's own rides as a safety measure (server should already do this)
+      const otherUsersRides = serverRides.filter((ride: any) => {
+        const isOwnRide = ride.driver_id === user.id;
+        if (isOwnRide) {
+        }
+        return !isOwnRide;
       });
 
-      setRides(formattedRides);
+
+      // ROBUST RIDE MAPPING - Handle any missing fields
+      const formattedRides: Ride[] = otherUsersRides.map((ride: any, index: number) => {
+        
+        const formatted = {
+          id: ride.id || `missing-id-${index}`,
+          title: ride.title || 'No Title',
+          driverName: ride.driver_name || 'Driver',
+          driverRating: ride.driver_rating || 4.5,
+          driverId: ride.driver_id || '',
+          departureLocation: ride.departure_location || 'Unknown Location',
+          destinationLocation: ride.destination_location || 'Unknown Destination',
+          departureDate: ride.departure_date || new Date().toISOString().split('T')[0],
+          departureTime: ride.departure_time || '00:00:00',
+          pricePerSeat: parseFloat(ride.price_per_seat) || 0,
+          availableSeats: parseInt(ride.available_seats) || 0,
+          totalSeats: parseInt(ride.total_seats) || 0,
+          description: ride.description || '',
+          requestStatus: null,
+        };
+        
+        // FIXED SEAT VALIDATION - Ensure available_seats never exceeds total_seats
+        
+        let seatsFixed = false;
+        if (formatted.availableSeats > formatted.totalSeats) {
+          formatted.availableSeats = formatted.totalSeats;
+          seatsFixed = true;
+        }
+        
+        // Ensure seats are never negative
+        if (formatted.availableSeats < 0) {
+          formatted.availableSeats = 0;
+          seatsFixed = true;
+        }
+        
+        if (seatsFixed) {
+        }
+        
+        return formatted;
+      });
+
+      // Check request status for each ride to show proper button state
+      const ridesWithStatus = await Promise.all(
+        formattedRides.map(async (ride) => {
+          try {
+            const requestStatus = await rideApi.checkRequestStatus(ride.id);
+            
+            return {
+              ...ride,
+              requestStatus: requestStatus.has_requested ? (requestStatus.status as 'pending' | 'approved' | 'rejected') : null,
+              requestId: requestStatus.request_id,
+            };
+          } catch (error: any) {
+            console.warn(`⚠️ Could not check request status for ride ${ride.id}:`, error);
+            
+            // Check if it's an authentication error
+            if (error.message && error.message.includes('403')) {
+              console.error('🔐 SERVER ISSUE: Request status endpoint requires authentication fix');
+            }
+            
+            return {
+              ...ride,
+              requestStatus: null,
+              requestId: null,
+            };
+          }
+        })
+      );
+
+      // FORCE TEST RIDE if no data (for debugging)
+      if (ridesWithStatus.length === 0) {
+      }
+      
+      setRides(ridesWithStatus);
+      setCachedRides(ridesWithStatus); // Cache the results
+      setLastFetchTime(Date.now()); // Update cache timestamp
+      
+      // Force loading to false
+      setLoading(false);
+      setRefreshing(false);
+      
     } catch (error: any) {
-      console.error('Error fetching rides:', error);
-      Alert.alert('Error', 'Failed to load rides');
+      console.error('❌ Failed to fetch rides:', error);
+      
+      let errorMessage = 'Unable to load rides';
+      if (error.message.includes('timeout')) {
+        errorMessage = 'Request timed out. Please check your connection.';
+      } else if (error.message.includes('Network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (error.message.includes('server')) {
+        errorMessage = 'Server error. Please try again later.';
+      } else if (error.message.includes('401')) {
+        errorMessage = 'Authentication error. Please sign in again.';
+      }
+      
+      Alert.alert('Error Loading Rides', errorMessage);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -147,24 +259,26 @@ export default function HomeScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
-    fetchRides();
+    fetchRides(true); // Force refresh bypasses cache
   };
 
   const applyFilters = () => {
-    console.log('Applying filters:', { selectedSeats, selectedTime, maxPrice, selectedRating });
+    setFiltersApplied(true);
     setShowAdvancedFilters(false);
   };
 
   const clearAllFilters = () => {
     setSelectedSeats(null);
     setSelectedTime(null);
-    setMaxPrice(50);
+    setMaxPrice(100);
     setSelectedRating(null);
+    setSelectedFilter('all');
+    setFiltersApplied(false);
   };
 
 
   const filteredRides = rides.filter(ride => {
-    // Search filter
+    // Search filter - always apply when user types
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       if (
@@ -177,23 +291,28 @@ export default function HomeScreen() {
       }
     }
 
-    // Price filter
-    if (ride.pricePerSeat > maxPrice) {
+    // Only apply other filters if they have been explicitly applied or a date filter is selected
+    if (!filtersApplied && selectedFilter === 'all') {
+      return true; // Show all rides when no filters are applied
+    }
+
+    // Price filter - only apply if filters are applied
+    if (filtersApplied && ride.pricePerSeat > maxPrice) {
       return false;
     }
 
-    // Seats filter
-    if (selectedSeats && ride.availableSeats < selectedSeats) {
+    // Seats filter - only apply if filters are applied
+    if (filtersApplied && selectedSeats && ride.availableSeats < selectedSeats) {
       return false;
     }
 
-    // Rating filter
-    if (selectedRating && ride.driverRating < selectedRating) {
+    // Rating filter - only apply if filters are applied
+    if (filtersApplied && selectedRating && ride.driverRating < selectedRating) {
       return false;
     }
 
-    // Time filter
-    if (selectedTime) {
+    // Time filter - only apply if filters are applied
+    if (filtersApplied && selectedTime) {
       const rideHour = parseInt(ride.departureTime.split(':')[0]);
       switch (selectedTime) {
         case 'morning':
@@ -208,29 +327,44 @@ export default function HomeScreen() {
       }
     }
 
-    // Date filter
-    const today = new Date();
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const rideDate = new Date(ride.departureDate);
+    // Date filter - apply when user clicks date filter chips
+    if (selectedFilter !== 'all') {
+      const today = new Date();
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const rideDate = new Date(ride.departureDate);
 
-    switch (selectedFilter) {
-      case 'today':
-        return rideDate.toDateString() === today.toDateString();
-      case 'tomorrow':
-        return rideDate.toDateString() === tomorrow.toDateString();
-      case 'this_week':
-        const weekFromNow = new Date(today);
-        weekFromNow.setDate(today.getDate() + 7);
-        return rideDate >= today && rideDate <= weekFromNow;
-      default:
-        return true;
+      switch (selectedFilter) {
+        case 'today':
+          return rideDate.toDateString() === today.toDateString();
+        case 'tomorrow':
+          return rideDate.toDateString() === tomorrow.toDateString();
+        case 'this_week':
+          const weekFromNow = new Date(today);
+          weekFromNow.setDate(today.getDate() + 7);
+          return rideDate >= today && rideDate <= weekFromNow;
+        default:
+          return true;
+      }
     }
+
+    return true;
   });
 
+  // Apply filters to rides
+
   const handleRequestRide = (ride: Ride) => {
+    // Prevent any state updates that might interfere
     setSelectedRide(ride);
     setShowRequestModal(true);
+  };
+
+  const handleCloseModal = () => {
+    setShowRequestModal(false);
+    // Don't clear selectedRide immediately to prevent race conditions
+    setTimeout(() => {
+      setSelectedRide(null);
+    }, 300);
   };
 
   const handleSendRequest = async (message: string) => {
@@ -239,81 +373,106 @@ export default function HomeScreen() {
     try {
       setRequesting(true);
 
-      console.log('🚀 Sending ride request...');
-
-      // Insert the ride request
-      const { data: requestData, error } = await supabase
-        .from('ride_requests')
-        .insert({
-          ride_id: selectedRide.id,
-          passenger_id: user.id,
-          seats_requested: 1,
-          message: message || `Hi, I'd like to join your ride!`,
-          status: 'pending',
-        })
-        .select('id')
-        .single();
-
-      if (error) throw error;
-
-      console.log('✅ Request created with ID:', requestData.id);
-
-      // Get driver and passenger info for notifications
-      const { data: rideData } = await supabase
-        .from('rides')
-        .select(`
-          driver_id,
-          driver:profiles!rides_driver_id_fkey (
-            first_name,
-            last_name
-          )
-        `)
-        .eq('id', selectedRide.id)
-        .single();
-
-      const { data: passengerProfile } = await supabase
-        .from('profiles')
-        .select('first_name, last_name')
-        .eq('id', user.id)
-        .single();
-
-      if (rideData && passengerProfile) {
-        const passengerName = `${passengerProfile.first_name} ${passengerProfile.last_name}`;
-        const driverName = rideData.driver && rideData.driver.length > 0 
-          ? `${rideData.driver[0].first_name} ${rideData.driver[0].last_name}`
-          : 'Unknown Driver';
-
-        // Send notifications
-        await notifyRideRequest(
-          rideData.driver_id,
-          passengerName,
-          selectedRide.title,
-          selectedRide.id,
-          requestData.id
-        );
-
+      // Send ride request to server with proper seat validation
+      const result = await rideApi.requestRide(selectedRide.id, 1); // Request 1 seat by default
+      
+      
+      // Show success dropdown notification
+      Alert.alert(
+        '🎉 Request Sent Successfully!',
+        result.message || 'Your ride request has been sent to the driver. You\'ll be notified when they respond.',
+        [{ text: 'Awesome!' }]
+      );
+      
+      // Show in-app notification toast
+      sendNotification({
+        title: 'Ride Request Sent! 🎫',
+        message: `Your request to join "${selectedRide.title}" has been sent to the driver`,
+        type: 'success'
+      });
+      
+      // Create database notification for the passenger (appears in notifications page)
+      try {
         await notifyRideRequestSent(
-          user.id,
-          driverName,
-          selectedRide.title,
-          selectedRide.id,
-          requestData.id
+          user.id, // passenger ID (current user)
+          selectedRide.driverName, // driver name
+          selectedRide.title, // ride title
+          selectedRide.id, // ride ID
+          result.request_id // request ID
         );
+      } catch (notifError) {
+        console.error('❌ Failed to create passenger notification:', notifError);
+        // Don't fail the request if notification creation fails
       }
-
-      Alert.alert('Success', 'Your ride request has been sent!');
+      
+      // Update the ride's request status locally - FORCE UPDATE
+      setRides(prevRides => {
+        const updatedRides = prevRides.map(ride => 
+          ride.id === selectedRide.id 
+            ? { 
+                ...ride, 
+                requestStatus: 'pending' as const,
+                requestId: result.request_id
+              }
+            : ride
+        );
+        if (__DEV__) {
+          console.log('🔄 SEARCH: Updated ride request status');
+        }
+        return updatedRides;
+      });
+      
       setShowRequestModal(false);
       setSelectedRide(null);
+      
+      if (__DEV__) {
+        console.log('🔔 SEARCH: Ride request sent successfully');
+      }
+      
     } catch (error: any) {
-      console.error('Error sending request:', error);
-      Alert.alert('Error', error.message || 'Failed to send request');
+      if (__DEV__) {
+        console.error('❌ SEARCH: Failed to send request');
+      }
+      
+      let errorMessage = 'Failed to send ride request. Please try again.';
+      
+      // Check for specific error types
+      if (error.message) {
+        if (error.message.includes('Not enough seats')) {
+          errorMessage = 'This ride is fully booked. No seats available.';
+        } else if (error.message.includes('Cannot request your own ride')) {
+          errorMessage = 'You cannot request your own ride.';
+        } else if (error.message.includes('already have a pending request')) {
+          errorMessage = 'You already have a pending request for this ride.';
+        } else if (error.message.includes('Network request failed')) {
+          errorMessage = 'Network error. Please check your connection and try again.';
+        } else if (error.message.includes('500')) {
+          errorMessage = 'Server error. The request may have been saved. Please refresh and check.';
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      // If the request actually succeeded but there was a notification error, don't show error
+      if (error.message && error.message.includes('notification') && !error.message.includes('request')) {
+        if (__DEV__) {
+          console.log('⚠️ SEARCH: Request succeeded but notification failed');
+        }
+        return;
+      }
+      
+      Alert.alert('❌ Request Failed', errorMessage);
     } finally {
       setRequesting(false);
     }
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date as local date to avoid timezone issues
+    // Split "2025-11-11" and create local date instead of UTC
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    
     const today = new Date();
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -385,29 +544,51 @@ export default function HomeScreen() {
           <View style={styles.detailItem}>
             <UserIcon size={16} color={Colors.textSecondary} />
             <Text style={styles.detailText}>
-              {item.availableSeats}/{item.totalSeats - 1} seats
+              {item.availableSeats}/{item.totalSeats} seats
             </Text>
           </View>
         </View>
 
-        {item.requestStatus ? (
-          <View style={[
-            styles.requestButton,
-            styles.requestStatusContainer,
-            item.requestStatus === 'pending' && styles.requestPending,
-            item.requestStatus === 'approved' && styles.requestApproved,
-            item.requestStatus === 'rejected' && styles.requestRejected,
-          ]}>
-            <Text style={[
-              styles.requestStatusText,
-              item.requestStatus === 'pending' && styles.requestPendingText,
-              item.requestStatus === 'approved' && styles.requestApprovedText,
-              item.requestStatus === 'rejected' && styles.requestRejectedText,
-            ]}>
-              {item.requestStatus === 'pending' && '⏳ Request Pending'}
-              {item.requestStatus === 'approved' && '✅ Request Approved'}
-              {item.requestStatus === 'rejected' && '❌ Request Rejected'}
-            </Text>
+        {/* Safety check: Don't show request button for user's own rides */}
+        {item.driverId === user?.id ? (
+          <View style={styles.ownRideButton}>
+            <Text style={styles.ownRideText}>Your Ride</Text>
+          </View>
+        ) : item.requestStatus === 'pending' ? (
+          <View style={styles.pendingButton}>
+            <View style={styles.pendingButtonContent}>
+              <View style={styles.pendingIcon}>
+                <Text style={styles.pendingIconText}>⏳</Text>
+              </View>
+              <View style={styles.pendingTextContainer}>
+                <Text style={styles.pendingTitle}>Request Sent</Text>
+                <Text style={styles.pendingSubtitle}>Waiting for response</Text>
+              </View>
+            </View>
+          </View>
+        ) : item.requestStatus === 'approved' ? (
+          <View style={styles.approvedButton}>
+            <View style={styles.approvedButtonContent}>
+              <View style={styles.approvedIcon}>
+                <Text style={styles.approvedIconText}>✓</Text>
+              </View>
+              <View style={styles.approvedTextContainer}>
+                <Text style={styles.approvedTitle}>Request Approved!</Text>
+                <Text style={styles.approvedSubtitle}>You can join this ride</Text>
+              </View>
+            </View>
+          </View>
+        ) : item.requestStatus === 'rejected' ? (
+          <View style={styles.rejectedButton}>
+            <View style={styles.rejectedButtonContent}>
+              <View style={styles.rejectedIcon}>
+                <Text style={styles.rejectedIconText}>✕</Text>
+              </View>
+              <View style={styles.rejectedTextContainer}>
+                <Text style={styles.rejectedTitle}>Request Declined</Text>
+                <Text style={styles.rejectedSubtitle}>Try other rides</Text>
+              </View>
+            </View>
           </View>
         ) : (
           <Button
@@ -464,7 +645,7 @@ export default function HomeScreen() {
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.filtersContainer}
         >
-          {filters.map((filter) => (
+          {dateFilters.map((filter) => (
             <TouchableOpacity
               key={filter.id}
               style={[
@@ -494,7 +675,9 @@ export default function HomeScreen() {
             
             <ScrollView 
               style={styles.filtersScrollContainer}
-              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.filtersScrollContent}
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled={true}
             >
               <View style={styles.filterRow}>
                 <View style={styles.filterLabelRow}>
@@ -505,10 +688,10 @@ export default function HomeScreen() {
                     <Text style={styles.priceRangeText}>Max Price: ${Math.round(maxPrice)}</Text>
                   </View>
                   <View style={styles.sliderWrapper}>
-                    <Text style={styles.sliderLabel}>$5</Text>
+                    <Text style={styles.sliderLabel}>$0</Text>
                     <Slider
                       style={styles.slider}
-                      minimumValue={5}
+                      minimumValue={0}
                       maximumValue={100}
                       value={maxPrice}
                       onValueChange={setMaxPrice}
@@ -633,7 +816,7 @@ export default function HomeScreen() {
           data={filteredRides}
           renderItem={renderRideCard}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.ridesList}
+          contentContainerStyle={[styles.ridesList, { paddingBottom: 100 }]}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
           }
@@ -641,24 +824,26 @@ export default function HomeScreen() {
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Text style={styles.emptyStateIcon}>🚗</Text>
-              <Text style={styles.emptyStateTitle}>No rides found</Text>
+              <Text style={styles.emptyStateTitle}>No rides available</Text>
               <Text style={styles.emptyStateText}>
-                Try adjusting your search or check back later for new rides.
+                No future rides found. Create a ride to get started or check back later!
               </Text>
             </View>
           }
         />
       )}
 
-      <RequestMessageModal
-        visible={showRequestModal}
-        onClose={() => setShowRequestModal(false)}
-        onSendRequest={handleSendRequest}
-        driverName={selectedRide?.driverName || 'Unknown Driver'}
-        rideTitle={selectedRide?.title || 'Ride'}
-        pricePerSeat={selectedRide?.pricePerSeat || 0}
-        loading={requesting}
-      />
+      {selectedRide && (
+        <RequestMessageModal
+          visible={showRequestModal}
+          onClose={handleCloseModal}
+          onSendRequest={handleSendRequest}
+          driverName={selectedRide.driverName}
+          rideTitle={selectedRide.title}
+          pricePerSeat={selectedRide.pricePerSeat}
+          loading={requesting}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -759,14 +944,13 @@ const styles = StyleSheet.create({
   rideCard: {
     marginBottom: Spacing.md,
     padding: Spacing.lg,
-    shadowColor: Colors.black,
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    ...getShadowStyle(
+      Colors.black,
+      { width: 0, height: 2 },
+      0.08,
+      8,
+      3
+    ),
   },
   rideHeader: {
     flexDirection: 'row',
@@ -851,6 +1035,19 @@ const styles = StyleSheet.create({
   requestButton: {
     marginTop: Spacing.sm,
   },
+  ownRideButton: {
+    marginTop: Spacing.sm,
+    backgroundColor: Colors.border + '30',
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+  },
+  ownRideText: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+  },
   requestStatusContainer: {
     paddingVertical: Spacing.md,
     paddingHorizontal: Spacing.lg,
@@ -884,6 +1081,153 @@ const styles = StyleSheet.create({
   requestRejectedText: {
     color: Colors.error,
   },
+  requestedButton: {
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FF8C00' + '20', // Orange background with transparency
+    borderWidth: 1,
+    borderColor: '#FF8C00', // Orange border
+  },
+  requestedButtonText: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    color: '#FF8C00', // Orange text
+  },
+  // Modern Pending Button Styles
+  pendingButton: {
+    marginTop: Spacing.sm,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.lg,
+    backgroundColor: '#FEF3C7', // Light amber background
+    borderWidth: 1,
+    borderColor: '#F59E0B', // Amber border
+  },
+  pendingButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  pendingIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingIconText: {
+    fontSize: 12,
+  },
+  pendingTextContainer: {
+    alignItems: 'center',
+  },
+  pendingTitle: {
+    color: '#92400E', // Dark amber
+    fontSize: FontSize.md,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  pendingSubtitle: {
+    color: '#A16207', // Medium amber
+    fontSize: FontSize.xs,
+    fontWeight: '500',
+  },
+  // Modern Approved Button Styles
+  approvedButton: {
+    marginTop: Spacing.sm,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.lg,
+    backgroundColor: '#10B981', // Modern green
+    ...getShadowStyle(
+      '#10B981',
+      { width: 0, height: 4 },
+      0.3,
+      8,
+      6
+    ),
+  },
+  approvedButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  approvedIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  approvedIconText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  approvedTextContainer: {
+    alignItems: 'center',
+  },
+  approvedTitle: {
+    color: '#FFFFFF',
+    fontSize: FontSize.md,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  approvedSubtitle: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: FontSize.xs,
+    fontWeight: '500',
+  },
+  // Modern Rejected Button Styles
+  rejectedButton: {
+    marginTop: Spacing.sm,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.lg,
+    backgroundColor: '#F3F4F6', // Light gray background
+    borderWidth: 1,
+    borderColor: '#EF4444', // Red border
+  },
+  rejectedButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+  },
+  rejectedIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FEE2E2', // Light red background
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rejectedIconText: {
+    color: '#EF4444', // Red color
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  rejectedTextContainer: {
+    alignItems: 'center',
+  },
+  rejectedTitle: {
+    color: '#EF4444', // Red color
+    fontSize: FontSize.md,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  rejectedSubtitle: {
+    color: '#6B7280', // Gray color
+    fontSize: FontSize.xs,
+    fontWeight: '500',
+  },
   emptyState: {
     alignItems: 'center',
     paddingVertical: Spacing.xl * 2,
@@ -911,18 +1255,22 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.lg,
     borderWidth: 1,
     borderColor: Colors.border,
-    shadowColor: Colors.black,
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 3.84,
-    elevation: 5,
+    ...getShadowStyle(
+      Colors.black,
+      { width: 0, height: 2 },
+      0.08,
+      8,
+      3
+    ),
+    maxHeight: 400, // Limit height to ensure buttons are accessible
   },
   filtersScrollContainer: {
+    maxHeight: 300, // Allow scrolling within this height
+  },
+  filtersScrollContent: {
     paddingHorizontal: Spacing.lg,
     paddingTop: Spacing.sm,
+    paddingBottom: Spacing.md,
   },
   advancedFiltersHeader: {
     flexDirection: 'row',
@@ -1088,6 +1436,9 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.md,
     borderTopWidth: 1,
     borderTopColor: Colors.border,
+    backgroundColor: Colors.surface,
+    borderBottomLeftRadius: BorderRadius.lg,
+    borderBottomRightRadius: BorderRadius.lg,
   },
   clearButton: {
     flex: 1,

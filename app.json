@@ -4,7 +4,7 @@
     "slug": "Zipply",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/Zipply_icon.png",
     "scheme": "zipply",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -51,11 +51,20 @@
         {
           "photosPermission": "Allow Zipply to access your photo library to save and select profile pictures."
         }
-      ]
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#2563EB",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": false
     }
   }
 }

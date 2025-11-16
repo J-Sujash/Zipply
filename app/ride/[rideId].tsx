@@ -1,43 +1,41 @@
-import React, { useState, useEffect } from 'react';
+import { router, useLocalSearchParams } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  Linking,
-  Dimensions,
-  Image,
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    Image,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../contexts/AuthContext';
+import { notifyRideRequest, notifyRideRequestSent, notifyPassengerLeft } from '../../lib/notifications';
+import { rideApi } from '../../lib/apiClient';
 import { supabase } from '../../lib/supabase';
-import { notifyRideRequest, notifyRideRequestSent } from '../../lib/notifications';
 
-import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
-import { RequestMessageModal } from '../../components/ui/RequestMessageModal';
+import { Card } from '../../components/ui/Card';
 import {
-  ArrowLeftIcon,
-  LocationIcon,
-  TimeIcon,
-  CalendarIcon,
-  UserIcon,
-  CarIcon,
-  StarIcon,
-  MapPinIcon,
-  ClockIcon,
-  UsersIcon,
-  PhoneIcon,
-  MailIcon,
-  MessageIcon,
+    ArrowLeftIcon,
+    CalendarIcon,
+    CarIcon,
+    ClockIcon,
+    MapPinIcon,
+    MessageIcon,
+    StarIcon,
+    TimeIcon,
+    UserIcon,
+    UsersIcon
 } from '../../components/ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
+import { RequestMessageModal } from '../../components/ui/RequestMessageModal';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
 import { getOrCreateConversation } from '../../lib/messaging';
+import { isMessagingDisabled } from '../../lib/messagingService';
 
 interface RideDetails {
   id: string;
@@ -71,14 +69,15 @@ interface RideDetails {
     license_plate: string;
     seats: number;
   };
-  passengers: Array<{
+  passengers: {
     id: string;
     firstName: string;
     lastName: string;
     profilePictureUrl?: string;
     seatsRequested: number;
-  }>;
+  }[];
   userRequestStatus?: 'none' | 'pending' | 'approved' | 'rejected';
+  userRequestId?: string; // ID of the user's ride request
 }
 
 const { width } = Dimensions.get('window');
@@ -115,6 +114,7 @@ export default function RideDetailsScreen() {
   const [ride, setRide] = useState<RideDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [requesting, setRequesting] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -191,16 +191,18 @@ export default function RideDetailsScreen() {
 
       // Check user's request status if logged in
       let userRequestStatus = 'none';
+      let userRequestId: string | undefined;
       if (user) {
         const { data: requestData } = await supabase
           .from('ride_requests')
-          .select('status')
+          .select('id, status')
           .eq('ride_id', rideId)
           .eq('passenger_id', user.id)
           .single();
 
         if (requestData) {
           userRequestStatus = requestData.status;
+          userRequestId = requestData.id;
         }
       }
 
@@ -244,6 +246,7 @@ export default function RideDetailsScreen() {
           seatsRequested: p.seats_requested,
         })),
         userRequestStatus: userRequestStatus as any,
+        userRequestId,
       };
 
       setRide(formattedRide);
@@ -354,6 +357,18 @@ export default function RideDetailsScreen() {
     }
 
     try {
+      // First check if messaging is disabled for this ride (45+ minutes after start)
+      const messagingStatus = await isMessagingDisabled(ride.id);
+      
+      if (messagingStatus.disabled) {
+        Alert.alert(
+          'Messaging Unavailable', 
+          messagingStatus.reason || 'Messaging is no longer available for this ride.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
       // Check if user has an approved request for this ride
       const { data: userRequest, error: requestError } = await supabase
         .from('ride_requests')
@@ -419,8 +434,119 @@ export default function RideDetailsScreen() {
     }
   };
 
+  const handleLeaveRide = async () => {
+    if (!user || !ride || !ride.userRequestId) return;
+
+    Alert.alert(
+      'Leave Ride',
+      'Are you sure you want to leave this ride? The seat will be made available for other passengers.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave Ride',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setLeaving(true);
+
+              // Get passenger name for notification
+              const { data: passengerProfile } = await supabase
+                .from('profiles')
+                .select('first_name, last_name')
+                .eq('id', user.id)
+                .single();
+
+              const passengerName = passengerProfile
+                ? `${passengerProfile.first_name} ${passengerProfile.last_name}`
+                : 'A passenger';
+
+              // Get the request to find seats requested
+              const { data: requestData, error: requestError } = await supabase
+                .from('ride_requests')
+                .select('seats_requested')
+                .eq('id', ride.userRequestId)
+                .single();
+
+              if (requestError) throw requestError;
+
+              const seatsRequested = requestData?.seats_requested || 1;
+
+              // Try to use server API first, fallback to direct Supabase
+              try {
+                const result = await rideApi.leaveRide(ride.userRequestId);
+                console.log('✅ Left ride via server:', result);
+              } catch (apiError: any) {
+                console.log('⚠️ Server API failed, using direct Supabase:', apiError.message);
+                
+                // Fallback: Direct Supabase implementation
+                // Delete the ride request
+                const { error: deleteError } = await supabase
+                  .from('ride_requests')
+                  .delete()
+                  .eq('id', ride.userRequestId);
+
+                if (deleteError) throw deleteError;
+
+                // Update available seats using RPC or increment
+                const { data: currentRide, error: fetchError } = await supabase
+                  .from('rides')
+                  .select('available_seats')
+                  .eq('id', ride.id)
+                  .single();
+
+                if (fetchError) throw fetchError;
+
+                const newAvailableSeats = (currentRide?.available_seats || 0) + seatsRequested;
+
+                const { error: updateError } = await supabase
+                  .from('rides')
+                  .update({
+                    available_seats: newAvailableSeats,
+                  })
+                  .eq('id', ride.id);
+
+                if (updateError) throw updateError;
+              }
+
+              // Send notification to driver
+              await notifyPassengerLeft(
+                ride.driver.id,
+                passengerName,
+                ride.title,
+                ride.id,
+                ride.userRequestId
+              );
+
+              Alert.alert(
+                'Ride Left',
+                'You have successfully left the ride. The seat has been made available again.',
+                [
+                  {
+                    text: 'OK',
+                    onPress: () => {
+                      router.back();
+                    },
+                  },
+                ]
+              );
+            } catch (error: any) {
+              console.error('Error leaving ride:', error);
+              Alert.alert('Error', error.message || 'Failed to leave ride. Please try again.');
+            } finally {
+              setLeaving(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date as local date to avoid timezone issues
+    // Split "2025-11-11" and create local date instead of UTC
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    
     const today = new Date();
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -469,7 +595,7 @@ export default function RideDetailsScreen() {
       case 'pending':
         return 'Request Pending';
       case 'approved':
-        return 'Request Approved';
+        return 'Leave Ride';
       case 'rejected':
         return 'Request Rejected';
       default:
@@ -486,6 +612,10 @@ export default function RideDetailsScreen() {
       ride.userRequestStatus !== 'none' ||
       requesting
     );
+  };
+
+  const shouldShowLeaveButton = () => {
+    return ride?.userRequestStatus === 'approved' && user && ride.userRequestId;
   };
 
   if (loading) {
@@ -638,9 +768,10 @@ export default function RideDetailsScreen() {
           
           {ride.vehicle ? (
             <View style={styles.vehicleContent}>
+              {/* Main Vehicle Display */}
               <View style={styles.vehicleMainInfo}>
                 <View style={styles.vehicleIconContainer}>
-                  <CarIcon size={28} color={Colors.white} />
+                  <CarIcon size={32} color={Colors.white} />
                 </View>
                 
                 <View style={styles.vehicleDetails}>
@@ -655,14 +786,42 @@ export default function RideDetailsScreen() {
                 </View>
               </View>
 
-              {/* Compact Vehicle Info */}
-              <View style={styles.compactVehicleInfo}>
-                <View style={styles.brandBadge}>
-                  <Text style={styles.brandText}>{ride.vehicle.make.toUpperCase()}</Text>
+              {/* Detailed Vehicle Specs */}
+              <View style={styles.vehicleSpecs}>
+                <View style={styles.specItem}>
+                  <Text style={styles.specLabel}>Year</Text>
+                  <View style={styles.specValueContainer}>
+                    <Text style={styles.specValue}>{ride.vehicle.year}</Text>
+                  </View>
                 </View>
-                <View style={styles.yearBadge}>
-                  <Text style={styles.yearText}>{ride.vehicle.year}</Text>
+                
+                <View style={styles.specItem}>
+                  <Text style={styles.specLabel}>Brand</Text>
+                  <View style={styles.specValueContainer}>
+                    <Text style={styles.specValue}>{ride.vehicle.make}</Text>
+                  </View>
                 </View>
+                
+                <View style={styles.specItem}>
+                  <Text style={styles.specLabel}>Model</Text>
+                  <View style={styles.specValueContainer}>
+                    <Text style={styles.specValue}>{ride.vehicle.model}</Text>
+                  </View>
+                </View>
+                
+                <View style={styles.specItem}>
+                  <Text style={styles.specLabel}>Color</Text>
+                  <View style={styles.specValueContainer}>
+                    <View style={[styles.colorIndicator, { backgroundColor: getColorFromName(ride.vehicle.color) }]} />
+                    <Text style={styles.specValue}>{ride.vehicle.color}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Vehicle Capacity */}
+              <View style={styles.vehicleCapacity}>
+                <UsersIcon size={16} color={Colors.primary} />
+                <Text style={styles.capacityText}>{ride.vehicle.seats} seats total</Text>
               </View>
             </View>
           ) : (
@@ -700,7 +859,7 @@ export default function RideDetailsScreen() {
             <View style={styles.passengersHeaderLeft}>
               <UsersIcon size={20} color={Colors.primary} />
               <Text style={styles.sectionTitle}>
-                Passengers ({ride.passengers.length}/{ride.totalSeats - 1})
+                Passengers ({ride.passengers.reduce((total, p) => total + p.seatsRequested, 0)}/{ride.totalSeats - 1})
               </Text>
             </View>
             {ride.passengers.length > 0 && (
@@ -809,13 +968,23 @@ export default function RideDetailsScreen() {
       {/* Bottom Action Button */}
       {ride.status === 'active' && (
         <View style={styles.bottomContainer}>
-          <Button
-            title={getRequestButtonText()}
-            onPress={handleJoinRide}
-            disabled={isRequestDisabled()}
-            loading={requesting}
-            style={styles.joinButton}
-          />
+          {shouldShowLeaveButton() ? (
+            <Button
+              title="Leave Ride"
+              onPress={handleLeaveRide}
+              loading={leaving}
+              variant="outline"
+              style={[styles.joinButton, styles.leaveButton]}
+            />
+          ) : (
+            <Button
+              title={getRequestButtonText()}
+              onPress={handleJoinRide}
+              disabled={isRequestDisabled()}
+              loading={requesting}
+              style={styles.joinButton}
+            />
+          )}
         </View>
       )}
 
@@ -1374,5 +1543,63 @@ const styles = StyleSheet.create({
   },
   joinButton: {
     width: '100%',
+  },
+  leaveButton: {
+    borderColor: Colors.error,
+    borderWidth: 2,
+  },
+  // Vehicle specification styles
+  vehicleSpecs: {
+    marginTop: Spacing.md,
+    paddingTop: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  specItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: Spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border + '30',
+  },
+  specLabel: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  specValueContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  specValue: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    color: Colors.text,
+  },
+  colorIndicator: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginRight: Spacing.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  vehicleCapacity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.md,
+    paddingTop: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    justifyContent: 'center',
+  },
+  capacityText: {
+    fontSize: FontSize.sm,
+    color: Colors.primary,
+    fontWeight: '600',
+    marginLeft: Spacing.sm,
   },
 });

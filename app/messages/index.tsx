@@ -1,37 +1,38 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { router } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  TouchableOpacity,
-  RefreshControl,
-  ActivityIndicator,
-  Image,
-  Alert,
-  Animated,
+    ActivityIndicator,
+    Alert,
+    Animated,
+    FlatList,
+    Image,
+    RefreshControl,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { router } from 'expo-router';
-import { useAuth } from '../../contexts/AuthContext';
-import { 
-  getUserConversations, 
-  getConversationPartner, 
-  formatMessageTime,
-  subscribeToUserConversations,
-  subscribeToMessageUpdates,
-  markMessagesAsRead,
-  type Conversation 
-} from '../../lib/messaging';
-import { Card } from '../../components/ui/Card';
-import { 
-  ArrowLeftIcon, 
-  MessageIcon, 
-  UserIcon,
-  SearchIcon 
+import {
+    MessageIcon,
+    SearchIcon
 } from '../../components/ui/Icons';
-import { Colors, FontSize, Spacing, BorderRadius } from '../../constants/Colors';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
+import { useAuth } from '../../contexts/AuthContext';
+import { messagingApi } from '../../lib/apiClient';
+import {
+    formatMessageTime,
+    markMessagesAsRead,
+    subscribeToMessageUpdates,
+    subscribeToUserConversations,
+    type Conversation
+} from '../../lib/messagingService';
+
+// FORCE CACHE REFRESH - Messages connected to application server
+const CACHE_BUSTER = '2025-10-25-01:17:00-MESSAGES-SERVER-CONNECTION';
+console.log('🔥 MESSAGES SERVER CONNECTION:', CACHE_BUSTER);
+console.log('🔥 MESSAGES: Now connected to application server via API client!');
 
 // Animated Unread Dot Component
 const UnreadDotIndicator = () => {
@@ -192,6 +193,9 @@ export default function MessagesScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastFetchTime, setLastFetchTime] = useState<Date>(new Date());
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [selectedConversations, setSelectedConversations] = useState<Set<string>>(new Set());
+  const [activeFilter, setActiveFilter] = useState<'all' | 'driver' | 'passenger'>('all');
 
   useEffect(() => {
     if (user) {
@@ -217,15 +221,69 @@ export default function MessagesScreen() {
     }
   }, [user]);
 
+  const filterExpiredConversations = async (conversations: Conversation[]): Promise<Conversation[]> => {
+    if (!conversations || conversations.length === 0) return [];
+    
+    try {
+      // Check each conversation to see if messaging is still enabled
+      const activeConversations: Conversation[] = [];
+      
+      for (const conversation of conversations) {
+        if (conversation.ride_id) {
+          try {
+            // Check if messaging is disabled for this ride
+            const status = await messagingApi.checkMessagingStatus(conversation.ride_id);
+            
+            if (!status.messaging_disabled) {
+              activeConversations.push(conversation);
+            } else if (__DEV__) {
+              console.log(`🧹 MESSAGES: Filtered expired conversation for ride ${conversation.ride_id}: ${status.reason}`);
+            }
+          } catch (error) {
+            // If we can't check the status, keep the conversation to be safe
+            activeConversations.push(conversation);
+          }
+        } else {
+          // If no ride_id, keep the conversation
+          activeConversations.push(conversation);
+        }
+      }
+      
+      return activeConversations;
+    } catch (error) {
+      if (__DEV__) {
+        console.error('❌ MESSAGES: Error filtering expired conversations');
+      }
+      // Return all conversations if filtering fails
+      return conversations;
+    }
+  };
+
   const fetchConversations = useCallback(async () => {
     try {
-      console.log('📱 Fetching conversations...');
-      const data = await getUserConversations();
-      setConversations(data);
+      if (__DEV__) {
+        console.log('📱 MESSAGES: Fetching conversations');
+      }
+      
+      // Use the new fast messaging API that includes real user names
+      const data = await messagingApi.getConversations();
+      
+      // Filter out expired conversations (rides that started 45+ minutes ago)
+      const activeConversations = await filterExpiredConversations(data);
+      
+      setConversations(activeConversations);
       setLastFetchTime(new Date());
-      console.log(`✅ Loaded ${data.length} conversations`);
+      
+      if (__DEV__) {
+        console.log(`✅ MESSAGES: Loaded ${activeConversations.length} active conversations`);
+        if (data.length > activeConversations.length) {
+          console.log(`🧹 MESSAGES: Filtered out ${data.length - activeConversations.length} expired conversations`);
+        }
+      }
     } catch (error) {
-      console.error('❌ Error fetching conversations:', error);
+      if (__DEV__) {
+        console.error('❌ MESSAGES: Error fetching conversations');
+      }
       Alert.alert('Error', 'Failed to load conversations. Please try again.');
     } finally {
       setLoading(false);
@@ -260,7 +318,75 @@ export default function MessagesScreen() {
     fetchConversations();
   }, [fetchConversations]);
 
+  const getFilteredConversations = () => {
+    if (!user || activeFilter === 'all') return conversations;
+    
+    return conversations.filter(conversation => {
+      if (activeFilter === 'driver') {
+        return conversation.driver_id === user.id;
+      } else if (activeFilter === 'passenger') {
+        return conversation.passenger_id === user.id;
+      }
+      return true;
+    });
+  };
+
+  const handleDeleteConversations = async () => {
+    try {
+      // Show confirmation alert
+      Alert.alert(
+        'Delete Conversations',
+        `Are you sure you want to delete ${selectedConversations.size} conversation(s)? This will only delete them for you.`,
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+          },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              // Delete conversations for current user only
+              for (const conversationId of selectedConversations) {
+                try {
+                  // Call API to hide conversation for current user
+                  await messagingApi.hideConversation(conversationId);
+                } catch (error) {
+                  console.error(`Failed to delete conversation ${conversationId}:`, error);
+                }
+              }
+              
+              // Remove deleted conversations from UI
+              setConversations(prev => 
+                prev.filter(conv => !selectedConversations.has(conv.id))
+              );
+              
+              // Reset edit mode
+              setIsEditMode(false);
+              setSelectedConversations(new Set());
+            },
+          },
+        ]
+      );
+    } catch (error) {
+      console.error('Error deleting conversations:', error);
+      Alert.alert('Error', 'Failed to delete conversations. Please try again.');
+    }
+  };
+
   const handleConversationPress = async (conversation: Conversation) => {
+    if (isEditMode) {
+      // Toggle selection in edit mode
+      const newSelected = new Set(selectedConversations);
+      if (newSelected.has(conversation.id)) {
+        newSelected.delete(conversation.id);
+      } else {
+        newSelected.add(conversation.id);
+      }
+      setSelectedConversations(newSelected);
+      return;
+    }
+
     try {
       // Optimistically update UI - mark as read immediately
       if ((conversation.unread_count || 0) > 0) {
@@ -289,100 +415,132 @@ export default function MessagesScreen() {
   const renderConversation = ({ item }: { item: Conversation }) => {
     if (!user) return null;
     
-    const partner = getConversationPartner(item, user.id);
+    // Use enriched data from the fast messaging API
+    const enrichedItem = item as any;
+    const isDriver = item.driver_id === user.id;
+    const isSelected = selectedConversations.has(item.id);
+    
+    // Get partner info from enriched conversation data with profile pictures
+    const partnerName = isDriver 
+      ? enrichedItem.passenger_name || 'Passenger'
+      : enrichedItem.driver_name || 'Driver';
+    
+    const partnerProfilePicture = isDriver 
+      ? enrichedItem.passenger_profile_picture_url
+      : enrichedItem.driver_profile_picture_url;
+    
+    const partner = {
+      first_name: partnerName.split(' ')[0] || 'User',
+      last_name: partnerName.split(' ').slice(1).join(' ') || '',
+      role: isDriver ? 'passenger' : 'driver',
+      profile_picture_url: partnerProfilePicture
+    };
+    
     const lastMessage = item.last_message;
     const isUnread = (item.unread_count || 0) > 0;
+    const messageTime = lastMessage ? formatMessageTime(lastMessage.created_at) : '';
 
     return (
       <TouchableOpacity
         onPress={() => handleConversationPress(item)}
-        style={styles.conversationContainer}
+        style={[
+          styles.conversationRow,
+          isSelected && styles.selectedConversationRow
+        ]}
+        activeOpacity={0.7}
       >
-        <Card variant="outlined" style={StyleSheet.flatten([
-          styles.conversationCard,
-          isUnread && styles.unreadCard,
-          isUnread && (item.unread_count || 0) > 5 && styles.highPriorityCard
-        ])}>
-          {/* Profile Picture */}
-          <View style={styles.avatarContainer}>
-            {partner?.profile_picture_url ? (
-              <Image 
-                source={{ uri: partner.profile_picture_url }} 
-                style={styles.avatar}
-              />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <UserIcon size={24} color={Colors.textSecondary} />
-              </View>
-            )}
-            {isUnread && <UnreadDotIndicator />}
-          </View>
-
-          {/* Conversation Info */}
-          <View style={styles.conversationInfo}>
-            <View style={styles.conversationHeader}>
-              <Text style={[
-                styles.partnerName,
-                isUnread && styles.unreadText
-              ]}>
-                {partner?.first_name && partner?.last_name 
-                  ? `${partner.first_name} ${partner.last_name}` 
-                  : 'Unknown User'}
-              </Text>
-              <View style={styles.conversationMeta}>
-                <View style={[
-                  styles.roleBadge,
-                  { backgroundColor: partner?.role === 'driver' ? Colors.primary + '20' : Colors.success + '20' }
-                ]}>
-                  <Text style={[
-                    styles.roleText,
-                    { color: partner?.role === 'driver' ? Colors.primary : Colors.success }
-                  ]}>
-                    {partner?.role === 'driver' ? '🚗 Driver' : '🎒 Passenger'}
+        {/* Selection Circle or Profile Picture */}
+        <View style={styles.avatarContainer}>
+          {isEditMode ? (
+            <View style={[
+              styles.selectionCircle,
+              isSelected && styles.selectedCircle
+            ]}>
+              {isSelected && (
+                <View style={styles.checkmark}>
+                  <Text style={styles.checkmarkText}>✓</Text>
+                </View>
+              )}
+            </View>
+          ) : (
+            <>
+              {partner?.profile_picture_url ? (
+                <Image 
+                  source={{ uri: partner.profile_picture_url }} 
+                  style={styles.avatar}
+                />
+              ) : (
+                <View style={styles.avatarPlaceholder}>
+                  <Text style={styles.avatarInitial}>
+                    {partnerName[0]?.toUpperCase() || 'U'}
                   </Text>
                 </View>
-                {lastMessage && (
-                  <Text style={styles.timestamp}>
-                    {formatMessageTime(lastMessage.created_at)}
-                  </Text>
-                )}
-              </View>
-            </View>
+              )}
+              {isUnread && <UnreadDotIndicator />}
+            </>
+          )}
+        </View>
 
-            {/* Ride Info */}
-            {item.ride && (
-              <View style={styles.rideInfo}>
-                <Text style={styles.rideRoute} numberOfLines={1}>
-                  {item.ride.departure_location} → {item.ride.destination_location}
-                </Text>
-              </View>
+        {/* Conversation Content - iOS Messages Style */}
+        <View style={styles.conversationContent}>
+          <View style={styles.conversationHeader}>
+            <Text style={[
+              styles.partnerName,
+              isUnread && styles.unreadText
+            ]}>
+              {partnerName}
+            </Text>
+            {messageTime && (
+              <Text style={[
+                styles.timestamp,
+                isUnread && styles.unreadTimestamp
+              ]}>
+                {messageTime}
+              </Text>
             )}
-
-            {/* Last Message */}
-            {lastMessage && (
-              <View style={styles.lastMessageContainer}>
-                <Text 
-                  style={[
-                    styles.lastMessage,
-                    isUnread && styles.unreadText
-                  ]} 
-                  numberOfLines={2}
-                >
-                  {lastMessage.message_type === 'system' ? '📢 ' : ''}
-                  {lastMessage.content}
-                </Text>
-              </View>
-            )}
-
           </View>
 
-          {/* Unread Count - Positioned in top right */}
-          {isUnread && (
-            <View style={styles.unreadBadgePosition}>
-              <UnreadBadge count={item.unread_count || 0} />
+          {/* Role Badge */}
+          <View style={styles.roleBadgeContainer}>
+            <View style={[
+              styles.roleBadge,
+              isDriver ? styles.driverBadge : styles.passengerBadge
+            ]}>
+              <Text style={[
+                styles.roleBadgeText,
+                isDriver ? styles.driverBadgeText : styles.passengerBadgeText
+              ]}>
+                {isDriver ? 'Driver' : 'Passenger'}
+              </Text>
             </View>
-          )}
-        </Card>
+          </View>
+
+          {/* Last Message */}
+          <View style={styles.lastMessageRow}>
+            {lastMessage ? (
+              <Text 
+                style={[
+                  styles.lastMessage,
+                  isUnread && styles.unreadLastMessage
+                ]} 
+                numberOfLines={2}
+              >
+                {lastMessage.content}
+              </Text>
+            ) : (
+              <Text style={styles.lastMessage}>
+                No messages yet
+              </Text>
+            )}
+            {isUnread && (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadCount}>
+                  {item.unread_count || 0}
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
       </TouchableOpacity>
     );
   };
@@ -411,10 +569,12 @@ export default function MessagesScreen() {
       <SafeAreaView style={styles.container}>
         <StatusBar style="dark" />
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-            <ArrowLeftIcon size={24} color={Colors.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Messages</Text>
+          <View style={styles.headerLeft}>
+            <TouchableOpacity onPress={() => router.back()} style={styles.cancelButton}>
+              <Text style={styles.cancelButtonText}>Back</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.headerTitle}>Chats</Text>
           <View style={styles.headerRight} />
         </View>
         <View style={styles.loadingContainer}>
@@ -429,42 +589,93 @@ export default function MessagesScreen() {
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
       
-      {/* Header */}
+      {/* Modern Messages Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <ArrowLeftIcon size={24} color={Colors.text} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Messages</Text>
-        <View style={styles.headerRight}>
-          {conversations.length > 0 && (
-            <View style={styles.headerStats}>
-              <Text style={styles.conversationCount}>
-                {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}
-              </Text>
-              {(() => {
-                const totalUnread = conversations.reduce((sum, conv) => sum + (conv.unread_count || 0), 0);
-                return totalUnread > 0 ? (
-                  <View style={styles.totalUnreadBadge}>
-                    <Text style={styles.totalUnreadText}>
-                      {totalUnread > 99 ? '99+' : totalUnread} new
-                    </Text>
-                  </View>
-                ) : null;
-              })()
-              }
-            </View>
+        <View style={styles.headerLeft}>
+          {isEditMode ? (
+            <TouchableOpacity 
+              style={styles.cancelButton}
+              onPress={() => {
+                setIsEditMode(false);
+                setSelectedConversations(new Set());
+              }}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity 
+              style={styles.backButton}
+              onPress={() => router.back()}
+            >
+              <Text style={styles.backButtonText}>‹</Text>
+            </TouchableOpacity>
           )}
+        </View>
+        <Text style={styles.headerTitle}>Chats</Text>
+        <View style={styles.headerRight}>
+          <TouchableOpacity 
+            style={styles.editButton}
+            onPress={() => setIsEditMode(!isEditMode)}
+          >
+            <Text style={styles.editButtonText}>
+              {isEditMode ? 'Done' : 'Edit'}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
 
+      {/* Role Filter Tabs */}
+      <View style={styles.filterTabs}>
+        <TouchableOpacity 
+          style={[styles.filterTab, activeFilter === 'all' && styles.activeFilterTab]}
+          onPress={() => setActiveFilter('all')}
+        >
+          <Text style={[styles.filterTabText, activeFilter === 'all' && styles.activeFilterTabText]}>All</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.filterTab, activeFilter === 'driver' && styles.activeFilterTab]}
+          onPress={() => setActiveFilter('driver')}
+        >
+          <Text style={[styles.filterTabText, activeFilter === 'driver' && styles.activeFilterTabText]}>Driver</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.filterTab, activeFilter === 'passenger' && styles.activeFilterTab]}
+          onPress={() => setActiveFilter('passenger')}
+        >
+          <Text style={[styles.filterTabText, activeFilter === 'passenger' && styles.activeFilterTabText]}>Passenger</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Search Bar */}
+      <View style={styles.searchContainer}>
+        <View style={styles.searchBar}>
+          <Text style={styles.searchIcon}>🔍</Text>
+          <Text style={styles.searchPlaceholder}>Search</Text>
+        </View>
+      </View>
+
+      {/* Delete Button */}
+      {isEditMode && selectedConversations.size > 0 && (
+        <View style={styles.deleteButtonContainer}>
+          <TouchableOpacity 
+            style={styles.deleteButton}
+            onPress={handleDeleteConversations}
+          >
+            <Text style={styles.deleteButtonText}>
+              Delete ({selectedConversations.size})
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Conversations List */}
       <FlatList
-        data={conversations}
+        data={getFilteredConversations()}
         renderItem={renderConversation}
         keyExtractor={(item) => item.id}
         contentContainerStyle={[
           styles.listContainer,
-          conversations.length === 0 && styles.emptyListContainer
+          getFilteredConversations().length === 0 && styles.emptyListContainer
         ]}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
@@ -479,32 +690,137 @@ export default function MessagesScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: Colors.background,
+    backgroundColor: '#F8FAFC',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-    backgroundColor: Colors.white,
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    paddingBottom: 16,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  headerLeft: {
+    minWidth: 60,
+    alignItems: 'flex-start',
+  },
+  cancelButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#FEF2F2',
+  },
+  cancelButtonText: {
+    fontSize: 15,
+    color: '#EF4444',
+    fontWeight: '600',
   },
   backButton: {
-    padding: Spacing.xs,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  backButtonText: {
+    fontSize: 20,
+    color: '#475569',
+    fontWeight: '600',
+  },
+  editButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#EFF6FF',
+  },
+  editButtonText: {
+    fontSize: 15,
+    color: '#3B82F6',
+    fontWeight: '600',
   },
   headerTitle: {
-    fontSize: FontSize.xl,
-    fontWeight: 'bold',
-    color: Colors.text,
-    flex: 1,
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1E293B',
     textAlign: 'center',
-    marginHorizontal: Spacing.md,
+    letterSpacing: -0.5,
   },
   headerRight: {
-    minWidth: 40,
+    minWidth: 60,
     alignItems: 'flex-end',
+  },
+  // Modern Filter Tabs
+  filterTabs: {
+    flexDirection: 'row',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    justifyContent: 'center',
+    gap: 8,
+  },
+  filterTab: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 25,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  activeFilterTab: {
+    backgroundColor: '#3B82F6',
+    borderColor: '#3B82F6',
+    shadowColor: '#3B82F6',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  filterTabText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#64748B',
+  },
+  activeFilterTabText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  searchContainer: {
+    paddingHorizontal: 24,
+    paddingBottom: 16,
+    backgroundColor: '#FFFFFF',
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  searchIcon: {
+    fontSize: 16,
+    marginRight: 8,
+    color: '#94A3B8',
+  },
+  searchPlaceholder: {
+    fontSize: 16,
+    color: '#94A3B8',
+    fontWeight: '400',
   },
   headerStats: {
     alignItems: 'flex-end',
@@ -544,62 +860,79 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
   },
   listContainer: {
-    padding: Spacing.lg,
+    paddingTop: 0,
   },
   emptyListContainer: {
     flex: 1,
   },
-  conversationContainer: {
-    marginBottom: Spacing.md,
-  },
-  conversationCard: {
-    padding: Spacing.lg,
+  // Modern conversation rows
+  conversationRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    borderRadius: BorderRadius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    backgroundColor: Colors.white,
-    shadowColor: Colors.black,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    backgroundColor: '#FFFFFF',
+    marginHorizontal: 16,
+    marginVertical: 4,
+    borderRadius: 16,
+    shadowColor: '#000000',
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.04,
     shadowRadius: 8,
-    elevation: 3,
+    elevation: 2,
   },
-  unreadCard: {
-    borderLeftWidth: 4,
-    borderLeftColor: Colors.primary,
-    backgroundColor: Colors.primary + '05',
-    borderColor: Colors.primary + '30',
-  },
-  highPriorityCard: {
-    borderLeftColor: Colors.error,
-    backgroundColor: Colors.error + '08',
-    borderColor: Colors.error + '30',
-    shadowColor: Colors.error,
-    shadowOpacity: 0.15,
+  selectedConversationRow: {
+    backgroundColor: '#EFF6FF',
+    borderWidth: 2,
+    borderColor: '#3B82F6',
+    shadowColor: '#3B82F6',
+    shadowOpacity: 0.1,
   },
   avatarContainer: {
     position: 'relative',
-    marginRight: Spacing.md,
+    marginRight: 16,
+    marginTop: 2,
   },
   avatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
   },
   avatarPlaceholder: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: Colors.background,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#3B82F6',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.border,
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  avatarInitial: {
+    fontSize: 22,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   unreadDotContainer: {
     position: 'absolute',
@@ -625,60 +958,59 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.error + '40',
     zIndex: 1,
   },
-  conversationInfo: {
+  // Conversation content styles
+  conversationContent: {
     flex: 1,
   },
   conversationHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: Spacing.xs,
+    marginBottom: 2,
   },
   partnerName: {
-    fontSize: FontSize.md,
+    fontSize: 17,
     fontWeight: '600',
-    color: Colors.text,
+    color: '#1E293B',
     flex: 1,
+    lineHeight: 22,
   },
   unreadText: {
-    fontWeight: 'bold',
-  },
-  conversationMeta: {
-    alignItems: 'flex-end',
-    marginLeft: Spacing.sm,
-  },
-  roleBadge: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 2,
-    borderRadius: BorderRadius.sm,
-    marginBottom: Spacing.xs,
-  },
-  roleText: {
-    fontSize: FontSize.xs,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   timestamp: {
-    fontSize: FontSize.xs,
-    color: Colors.textSecondary,
+    fontSize: 13,
+    color: '#94A3B8',
+    fontWeight: '500',
+    marginLeft: 8,
+    marginTop: 1,
   },
-  rideInfo: {
-    marginBottom: Spacing.sm,
+  unreadTimestamp: {
+    color: '#3B82F6',
+    fontWeight: '600',
   },
   rideRoute: {
     fontSize: FontSize.sm,
     color: Colors.textSecondary,
-    fontStyle: 'italic',
+    marginBottom: 2,
+    fontWeight: '500',
   },
-  lastMessageContainer: {
+  lastMessageRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   lastMessage: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
+    fontSize: 15,
+    color: '#64748B',
     flex: 1,
-    lineHeight: 18,
+    fontWeight: '400',
+    lineHeight: 20,
+    marginTop: 4,
+  },
+  unreadLastMessage: {
+    color: '#1E293B',
+    fontWeight: '500',
   },
   unreadBadgePosition: {
     position: 'absolute',
@@ -689,22 +1021,22 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   unreadBadge: {
-    backgroundColor: Colors.primary,
-    borderRadius: BorderRadius.full,
-    minWidth: 18,
-    height: 18,
+    backgroundColor: '#EF4444',
+    borderRadius: 12,
+    minWidth: 24,
+    height: 24,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1.5,
-    borderColor: Colors.white,
-    shadowColor: Colors.black,
+    paddingHorizontal: 8,
+    marginLeft: 8,
+    marginTop: 1,
+    shadowColor: '#EF4444',
     shadowOffset: {
       width: 0,
-      height: 1,
+      height: 2,
     },
-    shadowOpacity: 0.15,
-    shadowRadius: 2,
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
     elevation: 3,
   },
   unreadGlow: {
@@ -718,11 +1050,94 @@ const styles = StyleSheet.create({
     zIndex: -1,
   },
   unreadCount: {
-    color: Colors.white,
-    fontSize: 10,
-    fontWeight: '700',
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
     textAlign: 'center',
-    lineHeight: 12,
+  },
+  roleBadgeContainer: {
+    marginBottom: 4,
+  },
+  roleBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+  },
+  driverBadge: {
+    backgroundColor: '#10B981',
+  },
+  passengerBadge: {
+    backgroundColor: '#3B82F6',
+  },
+  roleBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    letterSpacing: 0.2,
+  },
+  driverBadgeText: {
+    color: '#FFFFFF',
+  },
+  passengerBadgeText: {
+    color: '#FFFFFF',
+  },
+  selectionCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 3,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  selectedCircle: {
+    borderColor: '#3B82F6',
+    backgroundColor: '#3B82F6',
+    shadowColor: '#3B82F6',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  checkmark: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  checkmarkText: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  deleteButtonContainer: {
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    backgroundColor: '#F8FAFC',
+  },
+  deleteButton: {
+    backgroundColor: '#EF4444',
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    shadowColor: '#EF4444',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  deleteButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   emptyContainer: {
     flex: 1,

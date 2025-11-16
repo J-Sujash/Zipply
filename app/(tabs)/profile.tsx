@@ -1,37 +1,37 @@
-import React, { useState, useEffect } from 'react';
+import { router } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  Alert,
-  ActivityIndicator,
-  Image,
-  ActionSheetIOS,
-  Platform,
-  Linking,
-  Modal,
-  Dimensions,
+    ActionSheetIOS,
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    Image,
+    Linking,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { router } from 'expo-router';
 import { useAuth } from '../../contexts/AuthContext';
 import { pickImage, takePhoto, updateCompleteProfilePicture } from '../../lib/imageUpload';
 import { getUnreadMessageCount } from '../../lib/messaging';
+import { getSimpleRideStats } from '../../lib/rideStats';
 
-import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
-import { Input } from '../../components/ui/Input';
+import { Card } from '../../components/ui/Card';
 import {
-  UserIcon,
-  MailIcon,
-  CarIcon,
-  CheckIcon,
+    CheckIcon,
+    MailIcon,
+    UserIcon
 } from '../../components/ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
+import { Input } from '../../components/ui/Input';
 import { NotificationIcon } from '../../components/ui/NotificationIcon';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
 
 interface UserProfile {
   firstName: string;
@@ -41,12 +41,15 @@ interface UserProfile {
   phone: string;
   bio: string;
   totalRides: number;
+  totalRidesAsDriver: number;
+  totalRidesAsPassenger: number;
   rating: number;
   verified: boolean;
   gradYear?: number;
   degree?: string;
   dateOfBirth?: string;
   profilePictureUrl?: string;
+  gender?: string;
 }
 
 export default function ProfileScreen() {
@@ -56,8 +59,11 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [showImageModal, setShowImageModal] = useState(false);
+  const [showVerificationTooltip, setShowVerificationTooltip] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  const [rideStats, setRideStats] = useState({ totalRidesAsDriver: 0, totalRidesAsPassenger: 0 });
+  const [loadingStats, setLoadingStats] = useState(false);
 
   useEffect(() => {
     if (authProfile) {
@@ -68,19 +74,44 @@ export default function ProfileScreen() {
         university: authProfile.school || '',
         phone: authProfile.phone_number || '',
         bio: authProfile.description || '',
-        totalRides: authProfile.total_rides_as_driver + authProfile.total_rides_as_passenger,
+        totalRides: rideStats.totalRidesAsDriver + rideStats.totalRidesAsPassenger,
+        totalRidesAsDriver: rideStats.totalRidesAsDriver,
+        totalRidesAsPassenger: rideStats.totalRidesAsPassenger,
         rating: authProfile.rating || 0,
         verified: authProfile.is_verified || false,
         gradYear: authProfile.grad_year,
         degree: authProfile.degree,
         dateOfBirth: authProfile.date_of_birth,
         profilePictureUrl: authProfile.profile_picture_url,
+        gender: authProfile.gender,
       });
       setError(null);
     } else if (user && !authLoading) {
       setError('Failed to load profile data. Please try signing in again.');
     }
-  }, [authProfile, user, authLoading]);
+  }, [authProfile, user, authLoading, rideStats]);
+
+  // Fetch ride statistics
+  useEffect(() => {
+    const fetchRideStats = async () => {
+      if (user?.id) {
+        try {
+          setLoadingStats(true);
+          console.log('📊 Fetching ride statistics for profile...');
+          const stats = await getSimpleRideStats(user.id);
+          setRideStats(stats);
+          console.log('✅ Ride statistics updated:', stats);
+        } catch (error) {
+          console.error('❌ Error fetching ride statistics:', error);
+          // Keep default values on error
+        } finally {
+          setLoadingStats(false);
+        }
+      }
+    };
+
+    fetchRideStats();
+  }, [user?.id]);
 
   // Fetch unread message count
   useEffect(() => {
@@ -101,6 +132,49 @@ export default function ProfileScreen() {
     const interval = setInterval(fetchUnreadCount, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
   }, [user]);
+
+  const updateProfileField = (field: keyof UserProfile, value: string | number) => {
+    setProfile(prev => prev ? { ...prev, [field]: value } : null);
+  };
+
+  const handleProfilePicturePress = () => {
+    if (!isEditing) {
+      // If not editing, show expanded image modal
+      if (profile?.profilePictureUrl) {
+        // setShowImageModal(true);
+      }
+      return;
+    }
+
+    // If editing, show photo options
+    const options = ['Take Photo', 'Choose from Gallery', 'Cancel'];
+    
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options,
+          cancelButtonIndex: 2,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 0) {
+            handleTakePhoto();
+          } else if (buttonIndex === 1) {
+            handlePickImage();
+          }
+        }
+      );
+    } else {
+      Alert.alert(
+        'Profile Picture',
+        'Choose an option',
+        [
+          { text: 'Take Photo', onPress: () => handleTakePhoto() },
+          { text: 'Choose from Gallery', onPress: () => handlePickImage() },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
+    }
+  };
 
   const handleSaveProfile = async () => {
     if (!profile) return;
@@ -138,59 +212,18 @@ export default function ProfileScreen() {
           text: 'Sign Out',
           style: 'destructive',
           onPress: async () => {
-            const { error } = await signOut();
-            if (error) {
-              Alert.alert('Error', 'Failed to sign out. Please try again.');
-            } else {
+            try {
+              await signOut();
+              console.log('✅ User signed out successfully');
               router.replace('/auth/login');
+            } catch (error) {
+              console.error('❌ Sign out failed:', error);
+              Alert.alert('Error', 'Failed to sign out. Please try again.');
             }
           }
         },
       ]
     );
-  };
-
-  const updateProfileField = (field: keyof UserProfile, value: string | number) => {
-    setProfile(prev => prev ? { ...prev, [field]: value } : null);
-  };
-
-  const handleProfilePicturePress = () => {
-    if (!isEditing) {
-      // If not editing, show expanded image modal
-      if (profile?.profilePictureUrl) {
-        setShowImageModal(true);
-      }
-      return;
-    }
-
-    // If editing, show photo options
-    const options = ['Take Photo', 'Choose from Gallery', 'Cancel'];
-    
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options,
-          cancelButtonIndex: 2,
-        },
-        (buttonIndex) => {
-          if (buttonIndex === 0) {
-            handleTakePhoto();
-          } else if (buttonIndex === 1) {
-            handlePickImage();
-          }
-        }
-      );
-    } else {
-      Alert.alert(
-        'Profile Picture',
-        'Choose an option',
-        [
-          { text: 'Take Photo', onPress: handleTakePhoto },
-          { text: 'Choose from Gallery', onPress: handlePickImage },
-          { text: 'Cancel', style: 'cancel' },
-        ]
-      );
-    }
   };
 
   const handleTakePhoto = async () => {
@@ -352,16 +385,17 @@ export default function ProfileScreen() {
 
   const menuItems = [
     { title: 'Ride History', icon: '🚗', onPress: () => router.push('/ride-history') },
+    { title: 'Pending Ratings', icon: '⭐', onPress: () => router.push('/pending-ratings' as any) },
     { title: 'Manage Vehicles', icon: '🚙', onPress: () => router.push('/vehicles') },
-    { title: 'Payment Methods', icon: '💳', onPress: () => {} },
     { 
       title: 'Notifications', 
       icon: '🔔', 
       onPress: () => router.push('/notifications'),
       badge: unreadMessageCount > 0 ? unreadMessageCount : undefined
     },
-    { title: 'Help & Support', icon: '❓', onPress: () => {} },
-    { title: 'Terms & Privacy', icon: '📋', onPress: () => {} },
+    { title: 'Help & Support', icon: '❓', onPress: () => router.push('/help-support') },
+    { title: 'Terms & Privacy', icon: '📋', onPress: () => router.push('/terms-privacy') },
+    { title: 'Additional Settings', icon: '⚙️', onPress: () => router.push('/additional-settings') },
   ];
 
   return (
@@ -420,9 +454,13 @@ export default function ProfileScreen() {
                 </View>
               )}
               {profile.verified && (
-                <View style={styles.verifiedBadge}>
+                <TouchableOpacity 
+                  style={styles.verifiedBadge}
+                  onPress={() => setShowVerificationTooltip(true)}
+                  activeOpacity={0.8}
+                >
                   <CheckIcon size={12} color={Colors.white} />
-                </View>
+                </TouchableOpacity>
               )}
             </TouchableOpacity>
             <View style={styles.profileInfo}>
@@ -430,22 +468,86 @@ export default function ProfileScreen() {
                 {profile.firstName} {profile.lastName}
               </Text>
               <Text style={styles.profileEmail}>{profile.email}</Text>
-              <View style={styles.statsRow}>
-                <View style={styles.statItem}>
-                  <Text style={styles.statValue}>{profile.totalRides}</Text>
-                  <Text style={styles.statLabel}>Rides</Text>
-                </View>
-                <View style={styles.statDivider} />
+              
+              {/* Verification Badge and Rating Row */}
+              <View style={styles.badgeRatingRow}>
+                {/* Verification Status Badge */}
                 <TouchableOpacity 
-                  style={styles.statItem}
-                  onPress={() => router.push({ pathname: '/ratings/[userId]', params: { userId: user?.id || '' } })}
+                  style={[
+                    styles.verificationBadge,
+                    profile.verified ? styles.verificationVerified : styles.verificationUnverified
+                  ]}
+                  onPress={() => setShowVerificationTooltip(true)}
+                  activeOpacity={0.8}
                 >
-                  <Text style={styles.statValue}>⭐ {profile.rating.toFixed(1)}</Text>
-                  <Text style={styles.statLabel}>Rating</Text>
+                  <View style={[
+                    styles.verificationIconContainer,
+                    profile.verified ? styles.verifiedIconContainer : styles.unverifiedIconContainer
+                  ]}>
+                    {profile.verified ? (
+                      <CheckIcon size={12} color={Colors.white} />
+                    ) : (
+                      <Text style={styles.unverifiedIcon}>!</Text>
+                    )}
+                  </View>
+                  <Text style={[
+                    styles.verificationText,
+                    profile.verified ? styles.verifiedText : styles.unverifiedText
+                  ]}>
+                    {profile.verified ? 'Verified' : 'Not Verified'}
+                  </Text>
+                </TouchableOpacity>
+                
+                {/* Rating Section */}
+                <TouchableOpacity 
+                  style={styles.ratingContainer}
+                  onPress={() => router.push({ pathname: '/ratings/[userId]', params: { userId: user?.id || '' } })}
+                  activeOpacity={0.8}
+                >
+                  <View style={styles.ratingBox}>
+                    <Text style={styles.ratingEmoji}>⭐</Text>
+                    <View style={styles.ratingInfo}>
+                      <Text style={styles.ratingValue}>{profile.rating.toFixed(1)}</Text>
+                      <Text style={styles.ratingLabel}>Rating</Text>
+                    </View>
+                  </View>
                 </TouchableOpacity>
               </View>
             </View>
           </View>
+        </Card>
+
+        {/* Ride Statistics Card */}
+        <Card variant="elevated" style={styles.statsCard}>
+          <Text style={styles.sectionTitle}>Ride Statistics</Text>
+          {loadingStats ? (
+            <View style={styles.loadingStatsContainer}>
+              <ActivityIndicator size="small" color={Colors.primary} />
+              <Text style={styles.loadingStatsText}>Loading statistics...</Text>
+            </View>
+          ) : (
+            <View style={styles.rideStatsContainer}>
+              <View style={styles.rideStatBox}>
+                <View style={styles.rideStatIcon}>
+                  <Text style={styles.rideStatEmoji}>🚗</Text>
+                </View>
+                <View style={styles.rideStatInfo}>
+                  <Text style={styles.rideStatValue}>{profile.totalRidesAsDriver}</Text>
+                  <Text style={styles.rideStatLabel}>As Driver</Text>
+                </View>
+              </View>
+              
+              <View style={styles.rideStatBox}>
+                <View style={styles.rideStatIcon}>
+                  <Text style={styles.rideStatEmoji}>🎒</Text>
+                </View>
+                <View style={styles.rideStatInfo}>
+                  <Text style={styles.rideStatValue}>{profile.totalRidesAsPassenger}</Text>
+                  <Text style={styles.rideStatLabel}>As Passenger</Text>
+                </View>
+              </View>
+            </View>
+          )}
         </Card>
 
         <Card variant="elevated" style={styles.formCard}>
@@ -501,13 +603,15 @@ export default function ProfileScreen() {
             />
           )}
 
-          <Input
-            label="Phone Number"
-            value={profile.phone}
-            onChangeText={(value) => updateProfileField('phone', value)}
-            keyboardType="phone-pad"
-            editable={isEditing}
-          />
+          {profile.gender && (
+            <Input
+              label="Gender"
+              value={profile.gender.charAt(0).toUpperCase() + profile.gender.slice(1)}
+              editable={false}
+              style={styles.disabledInput}
+            />
+          )}
+
 
           <Input
             label="Bio"
@@ -608,6 +712,45 @@ export default function ProfileScreen() {
             <Text style={styles.expandedImageName}>
               {profile?.firstName} {profile?.lastName}
             </Text>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Verification Tooltip Modal */}
+      <Modal
+        visible={showVerificationTooltip}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowVerificationTooltip(false)}
+      >
+        <TouchableOpacity 
+          style={styles.tooltipOverlay}
+          activeOpacity={1}
+          onPress={() => setShowVerificationTooltip(false)}
+        >
+          <View style={styles.tooltipContent}>
+            <View style={styles.tooltipHeader}>
+              {profile?.verified ? (
+                <CheckIcon size={20} color={Colors.success} />
+              ) : (
+                <Text style={[styles.unverifiedIcon, { fontSize: 20 }]}>!</Text>
+              )}
+              <Text style={styles.tooltipTitle}>
+                {profile?.verified ? 'Verified User' : 'Unverified User'}
+              </Text>
+            </View>
+            <Text style={styles.tooltipMessage}>
+              {profile?.verified 
+                ? 'This user has been verified by Zipply. Their identity and university affiliation have been confirmed.'
+                : 'This user has not yet been verified by Zipply. Identity and university affiliation are pending confirmation.'
+              }
+            </Text>
+            <TouchableOpacity 
+              style={styles.tooltipCloseButton}
+              onPress={() => setShowVerificationTooltip(false)}
+            >
+              <Text style={styles.tooltipCloseText}>Got it</Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -736,7 +879,7 @@ const styles = StyleSheet.create({
   profileEmail: {
     fontSize: FontSize.sm,
     color: Colors.textSecondary,
-    marginBottom: Spacing.md,
+    marginBottom: Spacing.xs,
   },
   statsRow: {
     flexDirection: 'row',
@@ -918,5 +1061,214 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginTop: Spacing.xl,
     textAlign: 'center',
+  },
+  // New styles for enhanced profile features
+  verifiedBadgeInline: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: Colors.success,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: Spacing.xs,
+  },
+  statsCard: {
+    marginBottom: Spacing.lg,
+  },
+  rideStatsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: Spacing.lg,
+  },
+  rideStatBox: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 1,
+    minHeight: 70,
+  },
+  rideStatIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: Colors.primary + '15',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.xs,
+  },
+  rideStatEmoji: {
+    fontSize: 16,
+  },
+  rideStatInfo: {
+    alignItems: 'center',
+  },
+  rideStatValue: {
+    fontSize: FontSize.xl,
+    fontWeight: 'bold',
+    color: Colors.text,
+    marginBottom: Spacing.xs,
+  },
+  rideStatLabel: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    textAlign: 'center',
+  },
+  // Tooltip modal styles
+  tooltipOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+  },
+  tooltipContent: {
+    backgroundColor: Colors.white,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.lg,
+    maxWidth: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  tooltipHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+  },
+  tooltipTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: 'bold',
+    color: Colors.text,
+    marginLeft: Spacing.sm,
+  },
+  tooltipMessage: {
+    fontSize: FontSize.md,
+    color: Colors.textSecondary,
+    lineHeight: 22,
+    marginBottom: Spacing.lg,
+  },
+  tooltipCloseButton: {
+    backgroundColor: Colors.primary,
+    borderRadius: BorderRadius.md,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    alignSelf: 'flex-end',
+  },
+  tooltipCloseText: {
+    color: Colors.white,
+    fontSize: FontSize.md,
+    fontWeight: '600',
+  },
+  // Verification badge styles
+  verificationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+    borderRadius: BorderRadius.full,
+    marginTop: Spacing.sm,
+    alignSelf: 'flex-start',
+  },
+  verificationVerified: {
+    backgroundColor: Colors.success + '15',
+    borderWidth: 1,
+    borderColor: Colors.success + '30',
+  },
+  verificationUnverified: {
+    backgroundColor: Colors.warning + '15',
+    borderWidth: 1,
+    borderColor: Colors.warning + '30',
+  },
+  verificationIconContainer: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: Spacing.xs,
+  },
+  verifiedIconContainer: {
+    backgroundColor: Colors.success,
+  },
+  unverifiedIconContainer: {
+    backgroundColor: Colors.warning,
+  },
+  unverifiedIcon: {
+    color: Colors.white,
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  verificationText: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  verifiedText: {
+    color: Colors.success,
+  },
+  unverifiedText: {
+    color: Colors.warning,
+  },
+  // Badge and rating row layout
+  badgeRatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: Spacing.sm,
+    gap: Spacing.sm,
+  },
+  // Rating section styles in profile card
+  ratingContainer: {
+    flex: 1,
+    alignItems: 'flex-end',
+  },
+  ratingBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.primary + '10',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    borderColor: Colors.primary + '20',
+  },
+  ratingEmoji: {
+    fontSize: 18,
+    marginRight: Spacing.sm,
+  },
+  ratingInfo: {
+    alignItems: 'flex-start',
+  },
+  ratingValue: {
+    fontSize: FontSize.lg,
+    fontWeight: 'bold',
+    color: Colors.text,
+    lineHeight: FontSize.lg + 2,
+  },
+  ratingLabel: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    marginTop: -2,
+  },
+  // Loading states for ride statistics
+  loadingStatsContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.lg,
+    gap: Spacing.sm,
+  },
+  loadingStatsText: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
   },
 });

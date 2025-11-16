@@ -12,13 +12,8 @@ const supabaseAnonKey =
   Constants.expoConfig?.extra?.supabaseAnonKey ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uYmVrdmZtc3Vwcmp2enNjYnBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk0MjQxNTMsImV4cCI6MjA3NTAwMDE1M30.XRt6rne3YCC9DjGvJbWKLwEnDD73eMVOZRfsly6b8D4';
 
-// Debug logging
-console.log('🔧 Supabase Configuration:');
-console.log('URL:', supabaseUrl);
-console.log('Key:', supabaseAnonKey ? `${supabaseAnonKey.substring(0, 20)}...` : 'MISSING');
-
+// Validate configuration
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('❌ Missing Supabase environment variables');
   throw new Error('Supabase configuration is missing');
 }
 
@@ -40,6 +35,7 @@ export interface Profile {
   school: string;
   grad_year: number;
   degree: 'bachelor' | 'masters' | 'phd';
+  major?: string;
   gender?: 'male' | 'female' | 'non-binary' | 'prefer-not-to-say';
   description?: string;
   profile_picture_url?: string;

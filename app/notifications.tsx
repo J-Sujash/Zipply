@@ -1,41 +1,44 @@
-import React, { useState, useEffect } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
-  Alert,
+    ActivityIndicator,
+    Alert,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { router } from 'expo-router';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
-import { getUnreadMessageCount } from '../lib/messaging';
+import { ApiNotification, notificationApi } from '../lib/apiClient';
+import { getUnreadMessageCount } from '../lib/messagingService';
 
-import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 import {
-  ArrowLeftIcon,
-  CheckIcon,
-  XIcon,
-  TrashIcon,
+    ArrowLeftIcon,
+    CheckIcon,
+    TrashIcon,
+    XIcon,
 } from '../components/ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../constants/Colors';
+import { BorderRadius, Colors, FontSize, Spacing } from '../constants/Colors';
 
-interface Notification {
-  id: string;
-  type: 'ride_request' | 'request_approved' | 'request_rejected' | 'ride_cancelled' | 'ride_reminder' | 'system';
-  title: string;
-  message: string;
+// PERFORMANCE OPTIMIZATION - Caching for instant loading
+const CACHE_BUSTER = '2025-10-27-00:48:00-PERFORMANCE-OPTIMIZATION';
+if (__DEV__) {
+  console.log('⚡ NOTIFICATIONS: Performance optimization enabled');
+}
+
+// Use the API notification type
+type Notification = ApiNotification & {
   isRead: boolean;
   createdAt: string;
   relatedRideId?: string;
   relatedRequestId?: string;
-}
+};
 
 export default function NotificationsScreen() {
   const { user } = useAuth();
@@ -47,11 +50,35 @@ export default function NotificationsScreen() {
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedNotifications, setSelectedNotifications] = useState<Set<string>>(new Set());
+  const [lastFetchTime, setLastFetchTime] = useState<number>(0);
+  const [cachedNotifications, setCachedNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
     fetchNotifications();
     fetchUnreadMessageCount();
   }, [user]);
+
+  // Auto-refresh notifications every 2 minutes (less aggressive)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!loading && !refreshing && user) {
+        console.log('🔄 Auto-refreshing notifications...');
+        fetchNotifications();
+        fetchUnreadMessageCount();
+      }
+    }, 120000); // 2 minutes instead of 30 seconds
+
+    return () => clearInterval(interval);
+  }, [loading, refreshing, user]);
+
+  // Refresh notifications when screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      console.log('📱 Notifications screen focused - refreshing...');
+      fetchNotifications();
+      fetchUnreadMessageCount();
+    }, [])
+  );
 
   const fetchUnreadMessageCount = async () => {
     if (!user) return;
@@ -64,35 +91,105 @@ export default function NotificationsScreen() {
     }
   };
 
-  const fetchNotifications = async () => {
-    if (!user) return;
+  const fetchNotifications = async (forceRefresh = false) => {
+    if (!user) {
+      console.log('⚠️ No user authenticated, skipping notification fetch');
+      return;
+    }
+
+    // PERFORMANCE: Use cache if data is fresh (less than 20 seconds old)
+    const now = Date.now();
+    const cacheAge = now - lastFetchTime;
+    const cacheValid = cacheAge < 20000; // 20 seconds
+
+    if (!forceRefresh && cacheValid && cachedNotifications.length >= 0) {
+      if (__DEV__) {
+        console.log('⚡ CACHE HIT: Using cached data (age:', Math.round(cacheAge / 1000), 'seconds)');
+      }
+      setNotifications(cachedNotifications);
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
 
     try {
       setError(null);
+      if (__DEV__) {
+        console.log('⚡ NOTIFICATIONS: Fetching from server');
+      }
       
-      const { data, error: fetchError } = await supabase
-        .from('notifications')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+      // Fetch notifications from server API
+      const serverNotifications = await notificationApi.getNotifications();
+      
+      if (__DEV__) {
+        console.log('📱 NOTIFICATIONS: Received', serverNotifications?.length || 0, 'notifications');
+      }
 
-      if (fetchError) throw fetchError;
+      if (!Array.isArray(serverNotifications)) {
+        throw new Error('Invalid response format from server');
+      }
 
-      const formattedNotifications: Notification[] = (data || []).map(notification => ({
-        id: notification.id,
-        type: notification.type,
-        title: notification.title,
-        message: notification.message,
-        isRead: notification.is_read,
-        createdAt: notification.created_at,
-        relatedRideId: notification.related_ride_id,
-        relatedRequestId: notification.related_request_id,
-      }));
+      // ROBUST MAPPING - Handle any missing fields
+      const formattedNotifications: Notification[] = serverNotifications.map((notification, index) => {
+        const formatted = {
+          id: notification.id || `missing-id-${index}`,
+          user_id: notification.user_id || user.id,
+          type: notification.type || 'system',
+          title: notification.title || 'No Title',
+          message: notification.message || 'No Message',
+          is_read: Boolean(notification.is_read),
+          created_at: notification.created_at || new Date().toISOString(),
+          related_ride_id: notification.related_ride_id || undefined,
+          related_request_id: notification.related_request_id || undefined,
+          // Legacy format for compatibility
+          isRead: Boolean(notification.is_read),
+          createdAt: notification.created_at || new Date().toISOString(),
+          relatedRideId: notification.related_ride_id || undefined,
+          relatedRequestId: notification.related_request_id || undefined,
+        };
+        
+        return formatted;
+      });
 
+      // Check if we got any notifications
+      if (formattedNotifications.length === 0) {
+        if (__DEV__) {
+          console.log('ℹ️ NO NOTIFICATIONS: No notifications found');
+        }
+      } else {
+        if (__DEV__) {
+          console.log('🎉 NOTIFICATIONS: Successfully loaded', formattedNotifications.length, 'notifications');
+        }
+      }
+      
       setNotifications(formattedNotifications);
-    } catch (error) {
-      console.error('Error fetching notifications:', error);
-      setError('Failed to load notifications. Please try again.');
+      setCachedNotifications(formattedNotifications); // Cache the results
+      setLastFetchTime(Date.now()); // Update cache timestamp
+      
+      if (__DEV__) {
+        console.log('✅ NOTIFICATIONS: State updated with', formattedNotifications.length, 'items');
+        console.log('⚡ CACHE: Updated for 20 seconds');
+      }
+      
+      // Force loading to false
+      setLoading(false);
+      setRefreshing(false);
+      
+    } catch (error: any) {
+      console.error('❌ Failed to fetch notifications:', error);
+      
+      let errorMessage = 'Unable to load notifications';
+      if (error.message.includes('timeout')) {
+        errorMessage = 'Request timed out. Please check your connection.';
+      } else if (error.message.includes('Network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (error.message.includes('server')) {
+        errorMessage = 'Server error. Please try again later.';
+      } else if (error.message.includes('401')) {
+        errorMessage = 'Authentication error. Please sign in again.';
+      }
+      
+      setError(errorMessage);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -101,13 +198,14 @@ export default function NotificationsScreen() {
 
   const markAsRead = async (notificationId: string) => {
     try {
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .eq('id', notificationId);
+      if (__DEV__) {
+        console.log('📖 NOTIFICATIONS: Marking notification as read');
+      }
+      
+      // Mark notification as read via server API
+      await notificationApi.markAsRead(notificationId);
 
-      if (error) throw error;
-
+      // Update local state
       setNotifications(prev => 
         prev.map(notification => 
           notification.id === notificationId 
@@ -115,50 +213,73 @@ export default function NotificationsScreen() {
             : notification
         )
       );
-    } catch (error) {
-      console.error('Error marking notification as read:', error);
+      
+      if (__DEV__) {
+        console.log('✅ NOTIFICATIONS: Notification marked as read');
+      }
+    } catch (error: any) {
+      if (__DEV__) {
+        console.error('❌ NOTIFICATIONS: Error marking notification as read');
+      }
+      Alert.alert('Error', 'Failed to mark notification as read. Please try again.');
     }
   };
 
   const markAllAsRead = async () => {
     try {
-      const unreadIds = notifications
-        .filter(n => !n.isRead)
-        .map(n => n.id);
+      const unreadCount = notifications.filter(n => !n.isRead).length;
+      if (unreadCount === 0) return;
 
-      if (unreadIds.length === 0) return;
+      if (__DEV__) {
+        console.log('📖 NOTIFICATIONS: Marking all notifications as read');
+      }
+      
+      // Mark all notifications as read via server API
+      await notificationApi.markAllAsRead();
 
-      const { error } = await supabase
-        .from('notifications')
-        .update({ is_read: true })
-        .in('id', unreadIds);
-
-      if (error) throw error;
-
+      // Update local state
       setNotifications(prev => 
         prev.map(notification => ({ ...notification, isRead: true }))
       );
+      
+      if (__DEV__) {
+        console.log('✅ NOTIFICATIONS: All notifications marked as read');
+      }
     } catch (error) {
-      console.error('Error marking all notifications as read:', error);
+      if (__DEV__) {
+        console.error('❌ NOTIFICATIONS: Error marking all notifications as read');
+      }
       Alert.alert('Error', 'Failed to mark all notifications as read.');
     }
   };
 
   const deleteNotification = async (notificationId: string) => {
     try {
-      const { error } = await supabase
-        .from('notifications')
-        .delete()
-        .eq('id', notificationId);
+      if (__DEV__) {
+        console.log('🗑️ NOTIFICATIONS: Deleting single notification');
+      }
+      
+      // Delete notification via server API
+      await notificationApi.deleteNotification(notificationId);
 
-      if (error) throw error;
-
+      // Update local state immediately
       setNotifications(prev => 
         prev.filter(notification => notification.id !== notificationId)
       );
+      
+      // Update cached notifications as well
+      setCachedNotifications(prev => 
+        prev.filter(notification => notification.id !== notificationId)
+      );
+      
+      if (__DEV__) {
+        console.log('✅ NOTIFICATIONS: Single notification deleted');
+      }
     } catch (error) {
-      console.error('Error deleting notification:', error);
-      Alert.alert('Error', 'Failed to delete notification.');
+      if (__DEV__) {
+        console.error('❌ NOTIFICATIONS: Error deleting notification');
+      }
+      Alert.alert('Error', 'Failed to delete notification. Please try again.');
     }
   };
 
@@ -176,21 +297,36 @@ export default function NotificationsScreen() {
           onPress: async () => {
             try {
               const idsToDelete = Array.from(selectedNotifications);
-              const { error } = await supabase
-                .from('notifications')
-                .delete()
-                .in('id', idsToDelete);
-
-              if (error) throw error;
-
+              if (__DEV__) {
+                console.log('🗑️ NOTIFICATIONS: Deleting', idsToDelete.length, 'selected notifications');
+              }
+              
+              // Delete selected notifications via server API
+              await notificationApi.deleteNotifications(idsToDelete);
+              
+              // Update local state immediately
               setNotifications(prev => 
                 prev.filter(notification => !selectedNotifications.has(notification.id))
               );
+              
+              // Update cached notifications as well
+              setCachedNotifications(prev => 
+                prev.filter(notification => !selectedNotifications.has(notification.id))
+              );
+              
+              // Reset selection state
               setSelectedNotifications(new Set());
               setSelectionMode(false);
+              
+              if (__DEV__) {
+                console.log('✅ NOTIFICATIONS: Bulk delete completed successfully');
+              }
+              
             } catch (error) {
-              console.error('Error deleting selected notifications:', error);
-              Alert.alert('Error', 'Failed to delete selected notifications.');
+              if (__DEV__) {
+                console.error('❌ NOTIFICATIONS: Error in bulk delete operation');
+              }
+              Alert.alert('Error', 'Failed to delete selected notifications. Please try again.');
             }
           }
         }
@@ -235,16 +371,28 @@ export default function NotificationsScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { error } = await supabase
-                .from('notifications')
-                .delete()
-                .eq('user_id', user?.id);
+              if (__DEV__) {
+                console.log('🗑️ NOTIFICATIONS: Clearing all notifications');
+              }
+              
+              // Clear all notifications via server API
+              await notificationApi.clearAllNotifications();
 
-              if (error) throw error;
+              // Update local state immediately
               setNotifications([]);
+              setCachedNotifications([]);
+              
+              if (__DEV__) {
+                console.log('✅ NOTIFICATIONS: All notifications cleared');
+              }
+              
+              // Refresh unread message count
+              fetchUnreadMessageCount();
             } catch (error) {
-              console.error('Error clearing notifications:', error);
-              Alert.alert('Error', 'Failed to clear notifications.');
+              if (__DEV__) {
+                console.error('❌ NOTIFICATIONS: Error clearing all notifications');
+              }
+              Alert.alert('Error', 'Failed to clear notifications. Please try again.');
             }
           }
         }
@@ -254,7 +402,10 @@ export default function NotificationsScreen() {
 
   const onRefresh = () => {
     setRefreshing(true);
-    fetchNotifications();
+    if (__DEV__) {
+      console.log('🔄 NOTIFICATIONS: Force refresh triggered');
+    }
+    fetchNotifications(true); // Force refresh bypasses cache
     fetchUnreadMessageCount();
   };
 
@@ -322,6 +473,16 @@ export default function NotificationsScreen() {
     if (filter === 'unread') return !notification.isRead;
     return true;
   });
+  
+  // Development-only render debugging
+  if (__DEV__) {
+    console.log('🔍 NOTIFICATIONS RENDER:', {
+      total: notifications.length,
+      filtered: filteredNotifications.length,
+      loading,
+      hasError: !!error
+    });
+  }
 
   const unreadCount = notifications.filter(n => !n.isRead).length;
 

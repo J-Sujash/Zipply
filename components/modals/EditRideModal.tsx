@@ -1,31 +1,29 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  Modal,
-  TouchableOpacity,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
-} from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Ride } from '../../lib/supabase';
-import { updateRide, UpdateRideData, canEditRide } from '../../lib/rideManagement';
+import React, { useEffect, useState } from 'react';
+import {
+    Alert,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from 'react-native';
+import { UpdateRideData, canEditRide } from '../../lib/rideManagement';
+import { Ride, supabase } from '../../lib/supabase';
 
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
 import { Button } from '../ui/Button';
-import { Input } from '../ui/Input';
 import { Card } from '../ui/Card';
 import {
-  LocationIcon,
-  TimeIcon,
-  CalendarIcon,
-  UserIcon,
-  XIcon,
-  CheckIcon,
+    CalendarIcon,
+    LocationIcon,
+    TimeIcon,
+    XIcon
 } from '../ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
+import { Input } from '../ui/Input';
 
 interface EditRideModalProps {
   visible: boolean;
@@ -140,7 +138,10 @@ export const EditRideModal: React.FC<EditRideModalProps> = ({
     try {
       // Format date and time for database
       const departureDate = selectedDate.toISOString().split('T')[0]; // YYYY-MM-DD
-      const departureTime = selectedTime.toTimeString().split(' ')[0].substring(0, 5); // HH:MM
+      // Convert time to UTC for Render server
+      const departureTime = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate(),
+                                    selectedTime.getHours(), selectedTime.getMinutes(), 0)
+                              .toISOString().split('T')[1].substring(0, 5); // HH:MM in UTC
 
       const updateData: UpdateRideData = {
         title: `${formData.from} to ${formData.to}`,
@@ -160,11 +161,41 @@ export const EditRideModal: React.FC<EditRideModalProps> = ({
       
       updateData.available_seats = newAvailableSeats;
 
-      const updatedRide = await updateRide(ride.id, updateData);
+      // Update ride directly in database
+      const { data: updatedRide, error: updateError } = await supabase
+        .from('rides')
+        .update(updateData)
+        .eq('id', ride.id)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+
+      // Get approved passengers to notify them about the update
+      const { data: approvedPassengers } = await supabase
+        .from('ride_requests')
+        .select('passenger_id, passenger:profiles!ride_requests_passenger_id_fkey(first_name, last_name)')
+        .eq('ride_id', ride.id)
+        .eq('status', 'approved');
+
+      // Send notifications to approved passengers
+      if (approvedPassengers && approvedPassengers.length > 0) {
+        const notifications = approvedPassengers.map((passenger: any) => ({
+          user_id: passenger.passenger_id,
+          type: 'ride_created', // Use existing enum value
+          title: 'Ride Updated 📝',
+          message: `The ride "${updateData.title}" from ${updateData.departure_location} to ${updateData.destination_location} has been updated by the driver. Please check the new details.`,
+          is_read: false,
+          related_ride_id: ride.id
+        }));
+
+        await supabase.from('notifications').insert(notifications);
+        console.log(`✅ Notified ${approvedPassengers.length} passengers about ride update`);
+      }
       
       Alert.alert(
         'Success! ✅',
-        'Your ride has been updated successfully.',
+        'Your ride has been updated successfully and passengers have been notified.',
         [{ text: 'OK', onPress: () => onSuccess(updatedRide) }]
       );
     } catch (error: any) {

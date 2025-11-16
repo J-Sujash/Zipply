@@ -1,30 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import { router, useLocalSearchParams } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
-  Dimensions,
-  Image,
-  Modal,
+    ActivityIndicator,
+    Dimensions,
+    Image,
+    Modal,
+    RefreshControl,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { StatusBar } from 'expo-status-bar';
-import { router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../contexts/AuthContext';
+import { reviewService } from '../../lib/reviewService';
+import { getSimpleRideStats } from '../../lib/rideStats';
 import { supabase } from '../../lib/supabase';
 
-import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
+import { Card } from '../../components/ui/Card';
 import {
-  ArrowLeftIcon,
-  StarIcon,
-  UserIcon,
+    ArrowLeftIcon,
+    SchoolIcon,
+    StarIcon,
+    UserIcon
 } from '../../components/ui/Icons';
-import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
+import { BorderRadius, Colors, FontSize, Spacing } from '../../constants/Colors';
 
 interface Review {
   id: string;
@@ -67,6 +70,9 @@ interface UserProfile {
   rating: number;
   totalRidesAsDriver: number;
   totalRidesAsPassenger: number;
+  university?: string;
+  graduationYear?: number;
+  degree?: string;
 }
 
 const { width } = Dimensions.get('window');
@@ -82,6 +88,8 @@ export default function RatingsScreen() {
   const [filter, setFilter] = useState<'all' | 'driver' | 'passenger'>('all');
   const [error, setError] = useState<string | null>(null);
   const [showImageModal, setShowImageModal] = useState(false);
+  const [rideStats, setRideStats] = useState({ totalRidesAsDriver: 0, totalRidesAsPassenger: 0 });
+  const [loadingStats, setLoadingStats] = useState(false);
 
   const isOwnProfile = user?.id === userId;
   const targetUserId = userId || user?.id;
@@ -89,16 +97,35 @@ export default function RatingsScreen() {
   useEffect(() => {
     if (targetUserId) {
       fetchRatingsData();
+      fetchRideStatistics();
     }
   }, [targetUserId, filter]);
+
+  const fetchRideStatistics = async () => {
+    if (!targetUserId) return;
+
+    try {
+      setLoadingStats(true);
+      console.log('📊 Fetching ride statistics for user:', targetUserId);
+      const stats = await getSimpleRideStats(targetUserId);
+      setRideStats(stats);
+      console.log('✅ Ride statistics updated:', stats);
+    } catch (error) {
+      console.error('❌ Error fetching ride statistics:', error);
+      // Keep default values on error
+    } finally {
+      setLoadingStats(false);
+    }
+  };
 
   const fetchRatingsData = async () => {
     if (!targetUserId) return;
 
     try {
       setError(null);
+      console.log('🔄 Fetching profile data directly from database for user:', targetUserId);
       
-      // Fetch user profile
+      // Fetch user profile directly from database
       const { data: profileData, error: profileError } = await supabase
         .from('profiles')
         .select(`
@@ -108,102 +135,113 @@ export default function RatingsScreen() {
           profile_picture_url,
           rating,
           total_rides_as_driver,
-          total_rides_as_passenger
+          total_rides_as_passenger,
+          school,
+          grad_year,
+          degree
         `)
         .eq('id', targetUserId)
         .single();
 
       if (profileError) throw profileError;
+      console.log('✅ Profile data received from database:', profileData);
 
       setProfile({
         id: profileData.id,
-        firstName: profileData.first_name,
-        lastName: profileData.last_name,
+        firstName: profileData.first_name || 'Unknown',
+        lastName: profileData.last_name || 'User',
         profilePictureUrl: profileData.profile_picture_url,
-        rating: profileData.rating,
-        totalRidesAsDriver: profileData.total_rides_as_driver,
-        totalRidesAsPassenger: profileData.total_rides_as_passenger,
+        rating: profileData.rating || 0,
+        totalRidesAsDriver: rideStats.totalRidesAsDriver,
+        totalRidesAsPassenger: rideStats.totalRidesAsPassenger,
+        university: profileData.school,
+        graduationYear: profileData.grad_year,
+        degree: profileData.degree,
       });
 
-      // Fetch rating statistics
-      const { data: statsData, error: statsError } = await supabase
-        .rpc('get_rating_stats', { user_id: targetUserId });
-
-      if (statsError) throw statsError;
-
-      if (statsData && statsData.length > 0) {
-        const stats = statsData[0];
-        setRatingStats({
-          totalReviews: stats.total_reviews,
-          averageRating: stats.average_rating,
-          fiveStar: stats.five_star,
-          fourStar: stats.four_star,
-          threeStar: stats.three_star,
-          twoStar: stats.two_star,
-          oneStar: stats.one_star,
-          driverReviews: stats.driver_reviews,
-          passengerReviews: stats.passenger_reviews,
-        });
-      }
-
-      // Fetch reviews with filters
-      let query = supabase
+      // Fetch rating statistics directly from database
+      console.log('🔄 Fetching rating stats directly from database...');
+      const { data: reviewsData, error: reviewsError } = await supabase
         .from('reviews')
-        .select(`
-          id,
-          rating,
-          comment,
-          is_driver_review,
-          created_at,
-          reviewer:profiles!reviews_reviewer_id_fkey (
-            id,
-            first_name,
-            last_name,
-            profile_picture_url
-          ),
-          ride:rides (
-            id,
-            title,
-            departure_location,
-            destination_location,
-            departure_date
-          )
-        `)
-        .eq('reviewee_id', targetUserId)
-        .order('created_at', { ascending: false });
+        .select('rating, is_driver_review')
+        .eq('reviewee_id', targetUserId);
 
-      if (filter === 'driver') {
-        query = query.eq('is_driver_review', true);
-      } else if (filter === 'passenger') {
-        query = query.eq('is_driver_review', false);
+      if (reviewsError) {
+        console.warn('⚠️ Could not fetch reviews:', reviewsError);
       }
 
-      const { data: reviewsData, error: reviewsError } = await query;
+      // Calculate rating statistics
+      const reviews = reviewsData || [];
+      const totalReviews = reviews.length;
+      const averageRating = totalReviews > 0 
+        ? reviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews 
+        : profileData.rating || 0;
 
-      if (reviewsError) throw reviewsError;
+      const ratingCounts = [0, 0, 0, 0, 0]; // [1-star, 2-star, 3-star, 4-star, 5-star]
+      reviews.forEach(review => {
+        if (review.rating >= 1 && review.rating <= 5) {
+          ratingCounts[review.rating - 1]++;
+        }
+      });
 
-      const formattedReviews: Review[] = (reviewsData || []).map((review: any) => ({
-        id: review.id,
-        rating: review.rating,
-        comment: review.comment,
-        isDriverReview: review.is_driver_review,
-        createdAt: review.created_at,
-        reviewer: {
-          id: review.reviewer?.id || '',
-          firstName: review.reviewer?.first_name || 'Unknown',
-          lastName: review.reviewer?.last_name || 'User',
-          profilePictureUrl: review.reviewer?.profile_picture_url,
-        },
-        ride: {
-          id: review.ride?.id || '',
-          title: review.ride?.title || 'Unknown Ride',
-          departureLocation: review.ride?.departure_location || 'Unknown',
-          destinationLocation: review.ride?.destination_location || 'Unknown',
-          departureDate: review.ride?.departure_date || '',
-        },
-      }));
+      const driverReviews = reviews.filter(r => r.is_driver_review).length;
+      const passengerReviews = reviews.filter(r => !r.is_driver_review).length;
 
-      setReviews(formattedReviews);
+      setRatingStats({
+        totalReviews,
+        averageRating,
+        oneStar: ratingCounts[0],
+        twoStar: ratingCounts[1],
+        threeStar: ratingCounts[2],
+        fourStar: ratingCounts[3],
+        fiveStar: ratingCounts[4],
+        driverReviews,
+        passengerReviews,
+      });
+
+      console.log('✅ Rating stats calculated:', {
+        totalReviews,
+        averageRating: averageRating.toFixed(1),
+        driverReviews,
+        passengerReviews
+      });
+
+      // Fetch actual reviews using reviewService (respects anonymity)
+      console.log('🔄 Fetching reviews with anonymity support...');
+      try {
+        const reviewsData = await reviewService.getUserReviews(targetUserId);
+        console.log('✅ Reviews fetched:', reviewsData.length);
+        
+        // Transform reviews to match our interface
+        const transformedReviews: Review[] = reviewsData.map(review => ({
+          id: review.id,
+          rating: review.rating,
+          comment: review.comment,
+          isDriverReview: review.is_driver_review,
+          createdAt: review.created_at,
+          reviewer: {
+            id: review.reviewer?.id || 'anonymous',
+            firstName: review.reviewer?.first_name || 'Anonymous',
+            lastName: review.reviewer?.last_name || 'User',
+            profilePictureUrl: review.reviewer?.profile_picture_url,
+          },
+          ride: {
+            id: review.ride?.id || '',
+            title: review.ride?.title || 'Unknown Ride',
+            departureLocation: review.ride?.departure_location || 'Unknown',
+            destinationLocation: review.ride?.destination_location || 'Unknown',
+            departureDate: review.ride?.departure_date || new Date().toISOString(),
+          },
+        }));
+        
+        setReviews(transformedReviews);
+      } catch (reviewError) {
+        console.warn('⚠️ Could not fetch reviews:', reviewError);
+        setReviews([]);
+      }
+      
+      console.log('✅ Profile data loaded successfully');
+      
     } catch (error: any) {
       console.error('Error fetching ratings data:', error);
       setError(error.message || 'Failed to load ratings data');
@@ -216,7 +254,20 @@ export default function RatingsScreen() {
   const onRefresh = () => {
     setRefreshing(true);
     fetchRatingsData();
+    fetchRideStatistics();
   };
+
+  // Update profile when ride stats change
+  useEffect(() => {
+    if (profile && (rideStats.totalRidesAsDriver !== profile.totalRidesAsDriver || 
+                   rideStats.totalRidesAsPassenger !== profile.totalRidesAsPassenger)) {
+      setProfile(prev => prev ? {
+        ...prev,
+        totalRidesAsDriver: rideStats.totalRidesAsDriver,
+        totalRidesAsPassenger: rideStats.totalRidesAsPassenger,
+      } : null);
+    }
+  }, [rideStats, profile]);
 
   const renderStars = (rating: number, size: number = 16) => {
     return (
@@ -233,33 +284,62 @@ export default function RatingsScreen() {
     );
   };
 
-  const renderRatingBar = (stars: number, count: number, total: number) => {
+  const renderModernRatingBar = (stars: number, count: number, total: number) => {
     const percentage = total > 0 ? (count / total) * 100 : 0;
     
     return (
-      <View style={styles.ratingBarContainer}>
-        <Text style={styles.ratingBarLabel}>{stars}</Text>
-        <StarIcon size={14} color={Colors.warning} filled />
-        <View style={styles.ratingBarTrack}>
+      <View style={styles.modernRatingBarContainer}>
+        <View style={styles.ratingBarLeft}>
+          <Text style={styles.modernRatingBarLabel}>{stars}</Text>
+          <StarIcon size={16} color="#FFD700" filled />
+        </View>
+        
+        <View style={styles.modernRatingBarTrack}>
           <View 
             style={[
-              styles.ratingBarFill, 
-              { width: `${percentage}%` }
+              styles.modernRatingBarFill, 
+              { 
+                width: `${percentage}%`,
+                backgroundColor: stars >= 4 ? '#10B981' : stars >= 3 ? '#F59E0B' : '#EF4444'
+              }
             ]} 
           />
         </View>
-        <Text style={styles.ratingBarCount}>{count}</Text>
+        
+        <View style={styles.ratingBarRight}>
+          <Text style={styles.modernRatingBarCount}>{count}</Text>
+          <Text style={styles.modernRatingBarPercentage}>
+            {total > 0 ? Math.round(percentage) : 0}%
+          </Text>
+        </View>
       </View>
     );
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date as local date to avoid timezone issues
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    
     return date.toLocaleDateString('en-US', {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
     });
+  };
+
+  const formatDegree = (degree?: string) => {
+    if (!degree) return '';
+    switch (degree.toLowerCase()) {
+      case 'bachelor':
+        return 'Bachelor\'s';
+      case 'masters':
+        return 'Master\'s';
+      case 'phd':
+        return 'PhD';
+      default:
+        return degree;
+    }
   };
 
   if (loading) {
@@ -320,12 +400,14 @@ export default function RatingsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
       >
-        {/* Profile Summary */}
-        <Card variant="elevated" style={styles.profileCard}>
+        {/* Modern Profile Summary */}
+        <Card variant="elevated" style={styles.modernProfileCard}>
+          {/* Profile Header */}
           <View style={styles.profileHeader}>
-            <View style={styles.avatarContainer}>
+            {/* Profile Picture */}
+            <View style={styles.avatarSection}>
               <TouchableOpacity 
-                style={styles.avatar}
+                style={styles.modernAvatar}
                 onPress={() => {
                   if (profile.profilePictureUrl) {
                     setShowImageModal(true);
@@ -336,45 +418,116 @@ export default function RatingsScreen() {
                 {profile.profilePictureUrl ? (
                   <Image 
                     source={{ uri: profile.profilePictureUrl }} 
-                    style={styles.avatarImage}
+                    style={styles.modernAvatarImage}
                     onError={(error) => {
                       console.warn('⚠️ Profile image failed to load:', error.nativeEvent.error);
-                      // Clear the broken URL from state to show fallback
                       setProfile(prev => prev ? { ...prev, profilePictureUrl: undefined } : null);
                     }}
                   />
                 ) : (
-                  <UserIcon size={40} color={Colors.white} />
+                  <View style={styles.avatarFallback}>
+                    <UserIcon size={40} color={Colors.white} />
+                  </View>
                 )}
+                <View style={styles.statusIndicator} />
               </TouchableOpacity>
             </View>
+            
+            {/* Profile Info */}
             <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>
+              <Text style={styles.modernProfileName}>
                 {profile.firstName} {profile.lastName}
               </Text>
-              <View style={styles.ratingRow}>
-                {renderStars(Math.round(profile.rating), 20)}
-                <Text style={styles.ratingText}>
-                  {profile.rating.toFixed(1)} ({ratingStats?.totalReviews || 0} reviews)
+              
+              {/* Star Rating */}
+              <View style={styles.modernRatingRow}>
+                <View style={styles.starsContainer}>
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <View key={star} style={styles.starIcon}>
+                      <StarIcon
+                        size={18}
+                        color={star <= Math.round(profile.rating) ? '#FFD700' : '#E5E7EB'}
+                      />
+                    </View>
+                  ))}
+                </View>
+                <Text style={styles.modernRatingText}>
+                  {profile.rating.toFixed(1)} ({ratingStats?.totalReviews || 0})
                 </Text>
               </View>
-              <Text style={styles.ridesText}>
-                {profile.totalRidesAsDriver} rides as driver • {profile.totalRidesAsPassenger} as passenger
-              </Text>
             </View>
           </View>
+
+          {/* Enhanced Stats Section */}
+          <View style={styles.enhancedStatsSection}>
+            <Text style={styles.statsTitle}>Ride History</Text>
+            {loadingStats ? (
+              <View style={styles.statsLoadingContainer}>
+                <ActivityIndicator size="small" color={Colors.primary} />
+                <Text style={styles.statsLoadingText}>Loading statistics...</Text>
+              </View>
+            ) : (
+              <View style={styles.modernStatsGrid}>
+                <View style={styles.modernStatCard}>
+                  <View style={styles.statIconContainer}>
+                    <Text style={styles.statEmoji}>🚗</Text>
+                  </View>
+                  <View style={styles.statContent}>
+                    <Text style={styles.modernStatNumber}>{profile.totalRidesAsDriver}</Text>
+                    <Text style={styles.modernStatLabel}>As Driver</Text>
+                  </View>
+                  <View style={styles.statIndicator} />
+                </View>
+                
+                <View style={styles.modernStatCard}>
+                  <View style={styles.statIconContainer}>
+                    <Text style={styles.statEmoji}>🎒</Text>
+                  </View>
+                  <View style={styles.statContent}>
+                    <Text style={styles.modernStatNumber}>{profile.totalRidesAsPassenger}</Text>
+                    <Text style={styles.modernStatLabel}>As Passenger</Text>
+                  </View>
+                  <View style={styles.statIndicator} />
+                </View>
+              </View>
+            )}
+          </View>
+
+          {/* Education Section */}
+          {(profile.university || profile.degree || profile.graduationYear) && (
+            <View style={styles.educationSection}>
+              <View style={styles.sectionHeader}>
+                <SchoolIcon size={18} color={Colors.primary} />
+                <Text style={styles.sectionTitle}>Education</Text>
+              </View>
+              
+              <View style={styles.educationContent}>
+                {profile.university && (
+                  <Text style={styles.universityName}>{profile.university}</Text>
+                )}
+                
+                {(profile.degree || profile.graduationYear) && (
+                  <Text style={styles.degreeText}>
+                    {profile.degree && profile.degree}
+                    {profile.degree && profile.graduationYear && ' • '}
+                    {profile.graduationYear && `Class of ${profile.graduationYear}`}
+                  </Text>
+                )}
+              </View>
+            </View>
+          )}
         </Card>
 
         {/* Rating Statistics */}
         {ratingStats && ratingStats.totalReviews > 0 && (
           <Card variant="elevated" style={styles.statsCard}>
             <Text style={styles.sectionTitle}>Rating Breakdown</Text>
-            <View style={styles.statsContainer}>
-              {renderRatingBar(5, ratingStats.fiveStar, ratingStats.totalReviews)}
-              {renderRatingBar(4, ratingStats.fourStar, ratingStats.totalReviews)}
-              {renderRatingBar(3, ratingStats.threeStar, ratingStats.totalReviews)}
-              {renderRatingBar(2, ratingStats.twoStar, ratingStats.totalReviews)}
-              {renderRatingBar(1, ratingStats.oneStar, ratingStats.totalReviews)}
+            <View style={styles.modernStatsContainer}>
+              {renderModernRatingBar(5, ratingStats.fiveStar, ratingStats.totalReviews)}
+              {renderModernRatingBar(4, ratingStats.fourStar, ratingStats.totalReviews)}
+              {renderModernRatingBar(3, ratingStats.threeStar, ratingStats.totalReviews)}
+              {renderModernRatingBar(2, ratingStats.twoStar, ratingStats.totalReviews)}
+              {renderModernRatingBar(1, ratingStats.oneStar, ratingStats.totalReviews)}
             </View>
           </Card>
         )}
@@ -458,10 +611,6 @@ export default function RatingsScreen() {
                 )}
                 
                 <View style={styles.rideInfo}>
-                  <Text style={styles.rideTitle}>{review.ride.title}</Text>
-                  <Text style={styles.rideRoute}>
-                    {review.ride.departureLocation} → {review.ride.destinationLocation}
-                  </Text>
                   <Text style={styles.rideDate}>
                     {formatDate(review.ride.departureDate)}
                   </Text>
@@ -595,36 +744,57 @@ const styles = StyleSheet.create({
   profileCard: {
     marginTop: Spacing.lg,
     marginBottom: Spacing.lg,
+    backgroundColor: Colors.white,
+    borderRadius: 16,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    padding: Spacing.xl,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
   },
-  profileHeader: {
+  profileTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginBottom: Spacing.md,
   },
-  avatarContainer: {
-    marginRight: Spacing.md,
+  profileMainInfo: {
+    flex: 1,
+    marginLeft: Spacing.md,
+  },
+  ridesSection: {
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.sm,
   },
   avatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
     backgroundColor: Colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
+    borderWidth: 4,
+    borderColor: Colors.white,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
   },
   avatarImage: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-  },
-  profileInfo: {
-    flex: 1,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
   },
   profileName: {
-    fontSize: FontSize.lg,
-    fontWeight: 'bold',
+    fontSize: FontSize.xl,
+    fontWeight: '700',
     color: Colors.text,
     marginBottom: Spacing.xs,
+    letterSpacing: -0.5,
   },
   ratingRow: {
     flexDirection: 'row',
@@ -643,14 +813,52 @@ const styles = StyleSheet.create({
     fontSize: FontSize.sm,
     color: Colors.textSecondary,
   },
-  statsCard: {
-    marginBottom: Spacing.lg,
+  universitySection: {
+    marginTop: Spacing.md,
+    paddingTop: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    gap: Spacing.sm,
+  },
+  universityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    paddingVertical: Spacing.xs,
+  },
+  universityText: {
+    fontSize: FontSize.md,
+    color: Colors.text,
+  },
+  universityName: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    color: Colors.primary,
+    marginBottom: Spacing.xs,
+  },
+  degreeText: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    fontWeight: '500',
+    lineHeight: 20,
   },
   sectionTitle: {
     fontSize: FontSize.md,
     fontWeight: '600',
     color: Colors.text,
     marginBottom: Spacing.md,
+  },
+  statsCard: {
+    marginBottom: Spacing.lg,
+    backgroundColor: Colors.white,
+    borderRadius: BorderRadius.lg,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    borderWidth: 1,
+    borderColor: Colors.border + '15',
   },
   statsContainer: {
     gap: Spacing.sm,
@@ -682,15 +890,79 @@ const styles = StyleSheet.create({
     width: 24,
     textAlign: 'right',
   },
+  // Modern Rating Bar Styles
+  modernStatsContainer: {
+    gap: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  modernRatingBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.xs,
+  },
+  ratingBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: 50,
+    gap: 4,
+  },
+  modernRatingBarLabel: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+    color: Colors.text,
+    width: 16,
+  },
+  modernRatingBarTrack: {
+    flex: 1,
+    height: 12,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 6,
+    overflow: 'hidden',
+    marginHorizontal: Spacing.md,
+  },
+  modernRatingBarFill: {
+    height: '100%',
+    borderRadius: 6,
+    minWidth: 2,
+  },
+  ratingBarRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: 70,
+    justifyContent: 'flex-end',
+    gap: Spacing.xs,
+  },
+  modernRatingBarCount: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+    color: Colors.text,
+    minWidth: 20,
+    textAlign: 'right',
+  },
+  modernRatingBarPercentage: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    fontWeight: '500',
+    minWidth: 30,
+    textAlign: 'right',
+  },
   filterContainer: {
     marginBottom: Spacing.lg,
   },
   filterWrapper: {
     flexDirection: 'row',
-    backgroundColor: '#F1F5F9',
-    borderRadius: 12,
-    padding: 3,
-    gap: 1,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    padding: 4,
+    gap: 2,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    borderWidth: 1,
+    borderColor: Colors.border + '30',
   },
   filterButton: {
     flex: 1,
@@ -704,11 +976,13 @@ const styles = StyleSheet.create({
   },
   activeFilterButton: {
     backgroundColor: Colors.white,
-    elevation: 1,
+    elevation: 2,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    borderWidth: 1,
+    borderColor: Colors.primary + '20',
   },
   filterButtonText: {
     fontSize: FontSize.xs,
@@ -724,6 +998,15 @@ const styles = StyleSheet.create({
   },
   reviewCard: {
     padding: Spacing.lg,
+    backgroundColor: Colors.white,
+    borderRadius: BorderRadius.lg,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    borderWidth: 1,
+    borderColor: Colors.border + '20',
   },
   reviewHeader: {
     flexDirection: 'row',
@@ -902,5 +1185,260 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginTop: Spacing.xl,
     textAlign: 'center',
+  },
+  // Modern Profile Card Styles
+  modernProfileCard: {
+    marginTop: Spacing.md,
+    marginBottom: Spacing.lg,
+    backgroundColor: Colors.white,
+    borderRadius: BorderRadius.lg,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingVertical: Spacing.lg,
+    paddingHorizontal: Spacing.lg,
+  },
+  modernAvatar: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: Colors.white,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    position: 'relative',
+  },
+  modernAvatarImage: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+  },
+  avatarFallback: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statusIndicator: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#10B981',
+    borderWidth: 2,
+    borderColor: Colors.white,
+  },
+  modernProfileName: {
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+    color: Colors.text,
+    marginBottom: Spacing.xs,
+    letterSpacing: -0.3,
+  },
+  modernRatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+    gap: Spacing.sm,
+  },
+  starIcon: {
+    marginRight: 2,
+  },
+  modernRatingText: {
+    fontSize: FontSize.md,
+    color: Colors.textSecondary,
+    fontWeight: '600',
+  },
+  rideStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: BorderRadius.md,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    marginTop: Spacing.sm,
+  },
+  statItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  statNumber: {
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+    color: Colors.primary,
+    marginBottom: 2,
+  },
+  statLabel: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  statDivider: {
+    width: 1,
+    height: 40,
+    backgroundColor: '#E2E8F0',
+    marginHorizontal: Spacing.md,
+  },
+  modernUniversitySection: {
+    marginTop: Spacing.lg,
+    paddingTop: Spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  universityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+    gap: Spacing.sm,
+  },
+  universitySectionTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: '700',
+    color: Colors.text,
+  },
+  // New responsive layout styles
+  profileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+  },
+  avatarSection: {
+    marginRight: Spacing.md,
+  },
+  profileInfo: {
+    flex: 1,
+  },
+  statsSection: {
+    flexDirection: 'row',
+    marginBottom: Spacing.lg,
+    gap: Spacing.md,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    borderRadius: BorderRadius.md,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  educationSection: {
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    paddingTop: Spacing.lg,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.md,
+    gap: Spacing.sm,
+  },
+  educationSectionTitle: {
+    fontSize: FontSize.md,
+    fontWeight: '700',
+    color: Colors.text,
+  },
+  educationContent: {
+    gap: Spacing.xs,
+  },
+  // Enhanced Modern Statistics Styles
+  enhancedStatsSection: {
+    marginBottom: Spacing.lg,
+    paddingTop: Spacing.md,
+  },
+  statsTitle: {
+    fontSize: FontSize.md,
+    fontWeight: '700',
+    color: Colors.text,
+    marginBottom: Spacing.md,
+    textAlign: 'left',
+  },
+  statsLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.xl,
+    gap: Spacing.sm,
+  },
+  statsLoadingText: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    fontWeight: '500',
+  },
+  modernStatsGrid: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+  modernStatCard: {
+    flex: 1,
+    backgroundColor: '#FAFBFC',
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+    borderWidth: 1,
+    borderColor: '#E8F4FD',
+    position: 'relative',
+    overflow: 'hidden',
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+  },
+  statIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: Colors.primary + '15',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.sm,
+  },
+  statEmoji: {
+    fontSize: 16,
+  },
+  statContent: {
+    alignItems: 'flex-start',
+  },
+  modernStatNumber: {
+    fontSize: FontSize.xxl,
+    fontWeight: '800',
+    color: Colors.primary,
+    marginBottom: 2,
+    lineHeight: FontSize.xxl + 4,
+  },
+  modernStatLabel: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  statIndicator: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: 3,
+    height: '100%',
+    backgroundColor: Colors.primary,
+    borderTopRightRadius: BorderRadius.lg,
+    borderBottomRightRadius: BorderRadius.lg,
   },
 });

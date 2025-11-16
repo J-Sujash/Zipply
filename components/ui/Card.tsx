@@ -1,11 +1,12 @@
 import React from 'react';
 import {
-  View,
-  StyleSheet,
-  ViewStyle,
-  TouchableOpacity,
+    StyleSheet,
+    TouchableOpacity,
+    View,
+    ViewStyle
 } from 'react-native';
-import { Colors, Spacing, BorderRadius } from '../../constants/Colors';
+import { BorderRadius, Colors, Spacing } from '../../constants/Colors';
+import { getShadowStyle } from '../../lib/shadowUtils';
 
 interface CardProps {
   children: React.ReactNode;
@@ -52,14 +53,13 @@ const styles = StyleSheet.create({
   },
   elevated: {
     backgroundColor: Colors.white,
-    shadowColor: Colors.black,
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    ...getShadowStyle(
+      Colors.black,
+      { width: 0, height: 2 },
+      0.1,
+      8,
+      4
+    ),
   },
   outlined: {
     backgroundColor: Colors.white,

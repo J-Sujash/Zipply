@@ -1,5 +1,5 @@
-import { Tabs } from 'expo-router';
 import { BlurView } from 'expo-blur';
+import { Redirect, Tabs } from 'expo-router';
 import { Platform, View } from 'react-native';
 import {
     HomeIcon,
@@ -9,8 +9,27 @@ import {
     UserIcon,
 } from '../../components/ui/Icons';
 import { Colors } from '../../constants/Colors';
+import { useAuth } from '../../contexts/AuthContext';
 
 export default function TabLayout() {
+  const { user, loading } = useAuth();
+
+  console.log('🏠 TabLayout state:', { loading, hasUser: !!user, userId: user?.id });
+
+  // If still loading auth state, show nothing (let root handle loading UI)
+  if (loading) {
+    console.log('🏠 TabLayout: Still loading, showing null');
+    return null;
+  }
+
+  // If no user, redirect to login
+  if (!user) {
+    console.log('🏠 TabLayout: No user, redirecting to login');
+    return <Redirect href="/auth/login" />;
+  }
+
+  console.log('🏠 TabLayout: User authenticated, showing tabs');
+
   return (
     <Tabs
       screenOptions={{
@@ -95,7 +114,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="create"
         options={{
-          title: 'Create Ride',
+          title: 'Create',
           tabBarIcon: ({ color, size }) => (
             <PlusIcon size={size} color={color} />
           ),

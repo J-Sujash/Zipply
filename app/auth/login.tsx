@@ -2,16 +2,17 @@ import { Link, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
-  Image,
-  Dimensions,
-  Animated,
-  Keyboard,
+    Alert,
+    Animated,
+    Dimensions,
+    Image,
+    Keyboard,
+    KeyboardAvoidingView,
+    Platform,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -28,6 +29,7 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
   const [keyboardOffset] = useState(new Animated.Value(0));
+  const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
 
   React.useEffect(() => {
     const keyboardWillShowListener = Keyboard.addListener(
@@ -77,24 +79,74 @@ export default function LoginScreen() {
     return Object.keys(newErrors).length === 0;
   };
 
-  const { signIn } = useAuth();
+  const { signIn, loading: authLoading, user } = useAuth();
+  const [hasAttemptedLogin, setHasAttemptedLogin] = React.useState(false);
+
+  // Navigate to home when user becomes available after login
+  React.useEffect(() => {
+    console.log('🔍 Login useEffect triggered:', { 
+      hasUser: !!user, 
+      userId: user?.id, 
+      authLoading, 
+      hasAttemptedLogin 
+    });
+    
+    if (user && !authLoading && hasAttemptedLogin) {
+      console.log('✅ All conditions met! Navigating to home...');
+      console.log('👤 User ID:', user.id);
+      console.log('⏳ Auth loading:', authLoading);
+      
+      // Use a small timeout to ensure state is fully updated
+      const timer = setTimeout(() => {
+        console.log('🚀 Executing navigation...');
+        router.replace('/(tabs)/home');
+      }, 100);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [user, authLoading, hasAttemptedLogin]);
 
   const handleLogin = async () => {
     if (!validateForm()) return;
     
     setLoading(true);
+    setHasAttemptedLogin(true);
+    
     try {
-      const { error } = await signIn(email, password);
+      const { error } = await signIn(email.trim().toLowerCase(), password);
       
       if (error) {
-        Alert.alert('Error', error.message || 'Failed to sign in. Please try again.');
-      } else {
-        router.replace('/(tabs)/home');
+        // Handle login errors
+        if (error.message?.includes('Email not confirmed') || 
+            error.message?.includes('email_not_confirmed')) {
+          Alert.alert(
+            'Email Not Verified',
+            'Please check your email and click the verification link before signing in.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { 
+                text: 'Resend Email', 
+                onPress: () => router.push(`/auth/verify-email?email=${encodeURIComponent(email)}`)
+              }
+            ]
+          );
+        } else {
+          Alert.alert('Error', error.message || 'Invalid email or password.');
+        }
+        setLoading(false);
+        setHasAttemptedLogin(false);
+        return;
       }
+
+      // Success - The useEffect will handle navigation when user becomes available
+      console.log('✅ Login successful! Waiting for auth state update...');
+      
+      // Don't set loading to false here - let the useEffect handle navigation
+      // The loading state will be updated by AuthContext after profile fetch
     } catch (error) {
       Alert.alert('Error', 'Failed to sign in. Please try again.');
-    } finally {
       setLoading(false);
+      setHasAttemptedLogin(false);
     }
   };
 
@@ -161,6 +213,13 @@ export default function LoginScreen() {
               style={styles.loginButton}
             />
 
+            <TouchableOpacity 
+              style={styles.forgotPasswordButton}
+              onPress={() => router.push('/auth/forgot-password')}
+            >
+              <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
+            </TouchableOpacity>
+
             <View style={styles.divider}>
               <View style={styles.dividerLine} />
               <Text style={styles.dividerText}>or</Text>
@@ -178,6 +237,7 @@ export default function LoginScreen() {
           </View>
         </Animated.View>
       </KeyboardAvoidingView>
+      
     </SafeAreaView>
   );
 }
@@ -229,6 +289,15 @@ const styles = StyleSheet.create({
   },
   loginButton: {
     marginTop: Spacing.md,
+  },
+  forgotPasswordButton: {
+    alignItems: 'center',
+    paddingVertical: Spacing.md,
+  },
+  forgotPasswordText: {
+    fontSize: FontSize.sm,
+    color: Colors.primary,
+    fontWeight: '500',
   },
   divider: {
     flexDirection: 'row',

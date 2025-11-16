@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "235252716121",
+    "project_id": "zipply-fd056",
+    "storage_bucket": "zipply-fd056.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:235252716121:android:fc0721db31b3204843d748",
+        "android_client_info": {
+          "package_name": "app.zipply.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBaXgnZUuaGu0ZmpGjq04uOiUMyWsfcrag"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

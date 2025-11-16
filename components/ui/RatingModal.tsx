@@ -7,8 +7,9 @@ import {
   TouchableOpacity,
   TextInput,
   Alert,
+  Switch,
 } from 'react-native';
-import { supabase } from '../../lib/supabase';
+import { reviewService } from '../../lib/reviewService';
 import { Colors, Spacing, FontSize, BorderRadius } from '../../constants/Colors';
 import { Button } from './Button';
 import { StarIcon } from './Icons';
@@ -20,6 +21,7 @@ interface RatingModalProps {
   revieweeId: string;
   revieweeName: string;
   isDriverReview: boolean;
+  userId: string;
   onSubmitted?: () => void;
 }
 
@@ -30,11 +32,13 @@ export function RatingModal({
   revieweeId,
   revieweeName,
   isDriverReview,
+  userId,
   onSubmitted,
 }: RatingModalProps) {
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [isAnonymous, setIsAnonymous] = useState(false);
 
   const handleSubmit = async () => {
     if (rating === 0) {
@@ -45,24 +49,33 @@ export function RatingModal({
     try {
       setSubmitting(true);
 
-      const { error } = await supabase
-        .from('reviews')
-        .insert({
-          ride_id: rideId,
-          reviewee_id: revieweeId,
-          rating,
-          comment: comment.trim() || null,
-          is_driver_review: isDriverReview,
-        });
-
-      if (error) throw error;
+      await reviewService.submitReview({
+        ride_id: rideId,
+        reviewer_id: userId,
+        reviewee_id: revieweeId,
+        rating,
+        comment: comment.trim() || undefined,
+        is_driver_review: isDriverReview,
+        is_anonymous: isAnonymous,
+      });
 
       Alert.alert('Success', 'Thank you for your rating!');
       onSubmitted?.();
       handleClose();
     } catch (error: any) {
       console.error('Error submitting rating:', error);
-      Alert.alert('Error', error.message || 'Failed to submit rating. Please try again.');
+      
+      // Handle specific error messages from server
+      let errorMessage = 'Failed to submit rating. Please try again.';
+      if (error.message.includes('expired') || error.message.includes('48 hours')) {
+        errorMessage = 'Rating window has expired. You can only rate within 48 hours of ride completion.';
+      } else if (error.message.includes('already rated')) {
+        errorMessage = 'You have already rated this person for this ride.';
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      Alert.alert('Error', errorMessage);
     } finally {
       setSubmitting(false);
     }
@@ -71,6 +84,7 @@ export function RatingModal({
   const handleClose = () => {
     setRating(0);
     setComment('');
+    setIsAnonymous(false);
     onClose();
   };
 
@@ -135,6 +149,25 @@ export function RatingModal({
             numberOfLines={3}
             maxLength={500}
           />
+
+          <View style={styles.anonymousContainer}>
+            <View style={styles.anonymousInfo}>
+              <Text style={styles.anonymousLabel}>Submit anonymously</Text>
+              <Text style={styles.anonymousDescription}>
+                Your name and profile won't be shown with this review
+              </Text>
+            </View>
+            <Switch
+              value={isAnonymous}
+              onValueChange={setIsAnonymous}
+              trackColor={{ 
+                false: Colors.border || '#E5E7EB', 
+                true: Colors.primary || '#3B82F6' 
+              }}
+              thumbColor={isAnonymous ? Colors.white || '#FFFFFF' : Colors.textSecondary || '#6B7280'}
+              ios_backgroundColor={Colors.border || '#E5E7EB'}
+            />
+          </View>
 
           <View style={styles.buttonContainer}>
             <Button
@@ -208,8 +241,33 @@ const styles = StyleSheet.create({
     fontSize: FontSize.md,
     color: Colors.text,
     textAlignVertical: 'top',
-    marginBottom: Spacing.xl,
+    marginBottom: Spacing.lg,
     minHeight: 80,
+  },
+  anonymousContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.md,
+    backgroundColor: Colors.background || '#F8F9FA',
+    borderRadius: BorderRadius.md,
+    marginBottom: Spacing.xl,
+  },
+  anonymousInfo: {
+    flex: 1,
+    marginRight: Spacing.md,
+  },
+  anonymousLabel: {
+    fontSize: FontSize.md,
+    fontWeight: '600',
+    color: Colors.text,
+    marginBottom: 2,
+  },
+  anonymousDescription: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    lineHeight: 18,
   },
   buttonContainer: {
     flexDirection: 'row',

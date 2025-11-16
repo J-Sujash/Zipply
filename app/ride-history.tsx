@@ -3,13 +3,14 @@ import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
+    Animated,
     Dimensions,
     RefreshControl,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
-    View,
+    View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../contexts/AuthContext';
@@ -42,6 +43,32 @@ interface RideHistoryItem {
   passengerCount?: number;
 }
 
+// Helper function to check if ride is within 48-hour rating window
+const isWithin48Hours = (departureDate: string, departureTime: string): boolean => {
+  try {
+    const [year, month, day] = departureDate.split('-').map(Number);
+    const [hours, minutes, seconds = 0] = departureTime.split(':').map(Number);
+    
+    const rideDateTime = new Date(year, month - 1, day, hours, minutes, seconds);
+    const now = new Date();
+    const timeSinceRide = now.getTime() - rideDateTime.getTime();
+    const fortyEightHours = 48 * 60 * 60 * 1000;
+    
+    // Must be after the ride time and within 48 hours
+    return timeSinceRide >= 0 && timeSinceRide <= fortyEightHours;
+  } catch (error) {
+    console.log(`❌ Error checking 48-hour window: ${departureDate} ${departureTime}`, error);
+    return false;
+  }
+};
+
+interface MonthGroup {
+  monthYear: string;
+  displayName: string;
+  rides: RideHistoryItem[];
+  isExpanded: boolean;
+}
+
 export default function RideHistoryScreen() {
   const { user } = useAuth();
   const [rideHistory, setRideHistory] = useState<RideHistoryItem[]>([]);
@@ -49,6 +76,7 @@ export default function RideHistoryScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'driver' | 'passenger'>('all');
+  const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchRideHistory();
@@ -216,6 +244,13 @@ export default function RideHistoryScreen() {
       });
 
       setRideHistory(allRides);
+      
+      // Auto-expand the most recent month if we have rides
+      if (allRides.length > 0) {
+        const [year, month] = allRides[0].departureDate.split('-');
+        const mostRecentMonth = `${year}-${month}`;
+        setExpandedMonths(new Set([mostRecentMonth]));
+      }
     } catch (error) {
       console.error('Error fetching ride history:', error);
       setError('Failed to load ride history. Please try again.');
@@ -231,7 +266,10 @@ export default function RideHistoryScreen() {
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date as local date to avoid timezone issues
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    
     return date.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -254,6 +292,87 @@ export default function RideHistoryScreen() {
     if (filter === 'all') return true;
     return ride.role === filter;
   });
+
+  // Group rides by month and year
+  const groupRidesByMonth = (rides: RideHistoryItem[]): MonthGroup[] => {
+    const groups: { [key: string]: RideHistoryItem[] } = {};
+    
+    rides.forEach(ride => {
+      const [year, month] = ride.departureDate.split('-');
+      const monthYear = `${year}-${month}`;
+      
+      if (!groups[monthYear]) {
+        groups[monthYear] = [];
+      }
+      groups[monthYear].push(ride);
+    });
+
+    return Object.entries(groups)
+      .map(([monthYear, rides]) => {
+        const [year, month] = monthYear.split('-');
+        const date = new Date(parseInt(year), parseInt(month) - 1, 1);
+        const displayName = date.toLocaleDateString('en-US', {
+          month: 'long',
+          year: 'numeric'
+        });
+
+        return {
+          monthYear,
+          displayName,
+          rides: rides.sort((a, b) => {
+            const dateA = new Date(`${a.departureDate} ${a.departureTime}`);
+            const dateB = new Date(`${b.departureDate} ${b.departureTime}`);
+            return dateB.getTime() - dateA.getTime();
+          }),
+          isExpanded: expandedMonths.has(monthYear)
+        };
+      })
+      .sort((a, b) => b.monthYear.localeCompare(a.monthYear)); // Sort by newest first
+  };
+
+  const toggleMonth = (monthYear: string) => {
+    const newExpanded = new Set(expandedMonths);
+    if (newExpanded.has(monthYear)) {
+      newExpanded.delete(monthYear);
+    } else {
+      newExpanded.add(monthYear);
+    }
+    setExpandedMonths(newExpanded);
+  };
+
+  const groupedRides = groupRidesByMonth(filteredRides);
+
+  const renderMonthHeader = (group: MonthGroup) => (
+    <TouchableOpacity
+      key={group.monthYear}
+      style={styles.monthHeader}
+      onPress={() => toggleMonth(group.monthYear)}
+      activeOpacity={0.7}
+    >
+      <View style={styles.monthHeaderContent}>
+        <View style={styles.monthInfo}>
+          <Text style={styles.monthTitle}>{group.displayName}</Text>
+          <Text style={styles.monthCount}>
+            {group.rides.length} ride{group.rides.length !== 1 ? 's' : ''}
+          </Text>
+        </View>
+        <View style={styles.monthToggle}>
+          <Animated.View
+            style={[
+              styles.chevron,
+              {
+                transform: [{
+                  rotate: group.isExpanded ? '90deg' : '0deg'
+                }]
+              }
+            ]}
+          >
+            <Text style={styles.chevronText}>›</Text>
+          </Animated.View>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
 
   const renderRideCard = (ride: RideHistoryItem) => (
     <Card key={ride.id} variant="elevated" style={styles.rideCard}>
@@ -334,6 +453,21 @@ export default function RideHistoryScreen() {
           }
         </Text>
       </View>
+
+      {ride.status === 'completed' && isWithin48Hours(ride.departureDate, ride.departureTime) && (
+        <View style={styles.actionContainer}>
+          <Button
+            title="⭐ Rate Ride"
+            onPress={() => {
+              console.log('🎯 Navigating to rate ride:', ride.id, 'Date:', ride.departureDate, 'Time:', ride.departureTime);
+              router.push(`/rate-ride/${ride.id}` as any);
+            }}
+            variant="outline"
+            style={styles.rateButton}
+            textStyle={styles.rateButtonText}
+          />
+        </View>
+      )}
     </Card>
   );
 
@@ -440,7 +574,16 @@ export default function RideHistoryScreen() {
             </View>
           ) : (
             <View style={styles.ridesContainer}>
-              {filteredRides.map(renderRideCard)}
+              {groupedRides.map(group => (
+                <View key={group.monthYear} style={styles.monthGroup}>
+                  {renderMonthHeader(group)}
+                  {group.isExpanded && (
+                    <View style={styles.monthRides}>
+                      {group.rides.map(renderRideCard)}
+                    </View>
+                  )}
+                </View>
+              ))}
             </View>
           )}
         </ScrollView>
@@ -536,7 +679,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   scrollContent: {
-    paddingHorizontal: Spacing.lg,
+    paddingHorizontal: Spacing.sm,
     paddingBottom: Spacing.xl,
   },
   rideCard: {
@@ -732,5 +875,78 @@ const styles = StyleSheet.create({
   },
   ridesContainer: {
     paddingTop: Spacing.sm,
+  },
+  actionContainer: {
+    marginTop: Spacing.md,
+    paddingTop: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  rateButton: {
+    backgroundColor: Colors.primary + '15',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.primary + '30',
+  },
+  rateButtonText: {
+    color: Colors.white,
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  monthGroup: {
+    marginBottom: Spacing.md,
+  },
+  monthHeader: {
+    backgroundColor: 'transparent',
+    marginHorizontal: 0,
+    marginBottom: Spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border + '50',
+  },
+  monthHeaderContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: Spacing.lg,
+    width: '100%',
+  },
+  monthInfo: {
+    flex: 1,
+  },
+  monthTitle: {
+    fontSize: FontSize.xl,
+    fontWeight: '800',
+    color: Colors.text,
+    marginBottom: 2,
+  },
+  monthCount: {
+    fontSize: FontSize.sm,
+    color: Colors.textSecondary,
+    fontWeight: '500',
+  },
+  monthToggle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: Colors.primary + '15',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chevron: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chevronText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: Colors.primary,
+  },
+  monthRides: {
+    paddingHorizontal: Spacing.sm,
+    paddingBottom: Spacing.md,
   },
 });

@@ -1,4 +1,6 @@
 import { supabase } from './supabase';
+// TODO: Replace all direct Supabase calls with API client calls to go through application server
+// For now, keeping Supabase calls for messaging as they require real-time functionality
 
 export interface Conversation {
   id: string;
@@ -278,18 +280,40 @@ export async function getOrCreateConversation(
  */
 export async function getUnreadMessageCount(): Promise<number> {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return 0;
-
-    const { data, error } = await supabase.rpc('get_unread_message_count', {
-      user_id: user.id
-    });
-
-    if (error) throw error;
-    return data || 0;
+    // Import messagingApi here to avoid circular imports
+    const { messagingApi } = await import('./apiClient');
+    
+    if (__DEV__) {
+      console.log('📊 Getting unread message count from server...');
+    }
+    const response = await messagingApi.getUnreadMessageCount();
+    
+    return response.count || 0;
   } catch (error) {
-    console.error('Error getting unread message count:', error);
-    return 0;
+    if (__DEV__) {
+      console.error('❌ Error getting unread message count from server:', error);
+    }
+    
+    // Fallback to direct Supabase call if server is unavailable
+    try {
+      if (__DEV__) {
+        console.log('🔄 Falling back to direct Supabase call...');
+      }
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return 0;
+
+      const { data, error } = await supabase.rpc('get_unread_message_count', {
+        user_id: user.id
+      });
+
+      if (error) throw error;
+      return data || 0;
+    } catch (fallbackError) {
+      if (__DEV__) {
+        console.error('❌ Fallback also failed:', fallbackError);
+      }
+      return 0;
+    }
   }
 }
 

@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { notificationApi } from './apiClient';
 
 export type NotificationType = 
   | 'ride_request' 
@@ -19,7 +19,7 @@ interface CreateNotificationParams {
 }
 
 /**
- * Creates a new notification in the database
+ * Creates a new notification in the database via server API
  */
 export async function createNotification({
   userId,
@@ -30,23 +30,21 @@ export async function createNotification({
   relatedRequestId,
 }: CreateNotificationParams) {
   try {
-    const { data, error } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        type,
-        title,
-        message,
-        related_ride_id: relatedRideId,
-        related_request_id: relatedRequestId,
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
+    console.log('🔔 Creating notification via server:', { userId, type, title });
+    
+    const data = await notificationApi.createNotification({
+      user_id: userId,
+      type,
+      title,
+      message,
+      related_ride_id: relatedRideId,
+      related_request_id: relatedRequestId,
+    });
+    
+    console.log('✅ Notification created successfully');
     return { data, error: null };
   } catch (error) {
-    console.error('Error creating notification:', error);
+    console.error('❌ Error creating notification:', error);
     return { data: null, error };
   }
 }
@@ -126,6 +124,26 @@ export async function notifyRequestRejected(
     type: 'request_rejected',
     title: 'Request Not Approved',
     message: `Unfortunately, ${driverName} couldn't approve your request for "${rideTitle}". Don't worry, there are other rides available!`,
+    relatedRideId: rideId,
+    relatedRequestId: requestId,
+  });
+}
+
+/**
+ * Creates a notification when a passenger leaves a ride
+ */
+export async function notifyPassengerLeft(
+  driverId: string,
+  passengerName: string,
+  rideTitle: string,
+  rideId: string,
+  requestId: string
+) {
+  return createNotification({
+    userId: driverId,
+    type: 'ride_cancelled',
+    title: 'Passenger Left Ride',
+    message: `${passengerName} has decided to leave your ride "${rideTitle}". The seat has been made available again.`,
     relatedRideId: rideId,
     relatedRequestId: requestId,
   });
@@ -243,61 +261,46 @@ export async function notifyWelcome(userId: string, firstName: string) {
 }
 
 /**
- * Marks all notifications as read for a user
+ * Marks all notifications as read for a user via server API
  */
 export async function markAllNotificationsAsRead(userId: string) {
   try {
-    const { error } = await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('user_id', userId)
-      .eq('is_read', false);
-
-    if (error) throw error;
+    console.log('📖 Marking all notifications as read via server for user:', userId);
+    await notificationApi.markAllAsRead();
+    // All notifications marked as read
     return { error: null };
   } catch (error) {
-    console.error('Error marking notifications as read:', error);
+    console.error('❌ Error marking notifications as read:', error);
     return { error };
   }
 }
 
 /**
- * Gets unread notification count for a user
+ * Gets unread notification count for a user via server API
  */
 export async function getUnreadNotificationCount(userId: string) {
   try {
-    const { count, error } = await supabase
-      .from('notifications')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('is_read', false);
-
-    if (error) throw error;
-    return { count: count || 0, error: null };
+    const result = await notificationApi.getUnreadCount();
+    return { count: result.count, error: null };
   } catch (error) {
-    console.error('Error getting unread count:', error);
+    console.error('❌ Error getting unread count:', error);
     return { count: 0, error };
   }
 }
 
 /**
  * Deletes old notifications (older than 30 days) for a user
+ * Note: This should be implemented as a server-side cleanup job
+ * For now, we'll keep this as a placeholder
  */
 export async function cleanupOldNotifications(userId: string) {
   try {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const { error } = await supabase
-      .from('notifications')
-      .delete()
-      .eq('user_id', userId)
-      .lt('created_at', thirtyDaysAgo.toISOString());
-
-    if (error) throw error;
+    console.log('🧹 Cleanup old notifications should be handled server-side for user:', userId);
+    // This should be implemented as a server-side cron job or background task
+    // For now, return success without doing anything
     return { error: null };
   } catch (error) {
-    console.error('Error cleaning up notifications:', error);
+    console.error('❌ Error in cleanup placeholder:', error);
     return { error };
   }
 }
